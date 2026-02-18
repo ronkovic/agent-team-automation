@@ -58,6 +58,46 @@ Generate implementation plan with Wave分割 and agent assignments from input re
 - Read and combine content
 - Extract key requirements
 
+### 2.5 Codebase Investigation (Parallel Agents)
+
+For large codebases, spawn 2-3 parallel investigation agents:
+
+```
+if codebase has 50+ files:
+  Spawn in parallel:
+  - Task(name: "investigator-structure", prompt: "Analyze project structure, dependencies, existing patterns")
+  - Task(name: "investigator-tests", prompt: "Analyze existing test coverage, test patterns, test framework")
+  - Task(name: "investigator-interfaces", prompt: "Identify public interfaces, shared types, API contracts")
+
+  Collect and synthesize results before proceeding to Step 3
+```
+
+### 2.8 Generate Requirements Specification
+
+Create `.claude/aad/requirements.md` with:
+
+```markdown
+# 実装仕様書
+
+## 概要
+{high-level description of what will be implemented}
+
+## 現状分析
+{current state of the codebase, existing patterns}
+
+## 実装仕様
+{detailed implementation specification per feature}
+
+## 影響分析
+{components affected, potential side effects}
+
+## テストケース
+{key test scenarios to cover}
+
+## 実装ガイドライン
+{coding conventions, patterns to follow, things to avoid}
+```
+
 ### 3. Scan Existing Codebase
 - Detect project structure patterns:
   - `src/`, `lib/`, `app/` (source code)
@@ -123,6 +163,7 @@ Analyze task complexity and assign appropriate model:
 Structure:
 ```json
 {
+  "featureName": "auth-feature",
   "waves": [
     {
       "id": 0,
@@ -144,7 +185,13 @@ Structure:
           "branch": "feature/order",
           "tasks": ["Implement order management"],
           "files": ["src/order.py", "tests/test_order.py"],
-          "dependsOn": []
+          "dependsOn": [],
+          "test_cases": [
+            "注文作成の正常系",
+            "無効な注文量のバリデーション",
+            "在庫不足エラー処理"
+          ],
+          "affected_components": ["OrderService", "OrderRepository", "OrderValidator"]
         },
         {
           "name": "agent-portfolio",
@@ -152,7 +199,9 @@ Structure:
           "branch": "feature/portfolio",
           "tasks": ["Implement portfolio tracking"],
           "files": ["src/portfolio.py", "tests/test_portfolio.py"],
-          "dependsOn": []
+          "dependsOn": [],
+          "test_cases": [],
+          "affected_components": []
         }
       ],
       "mergeOrder": ["agent-order", "agent-portfolio"]
@@ -167,7 +216,9 @@ Structure:
           "branch": "feature/integration",
           "tasks": ["Integrate order and portfolio"],
           "files": ["src/trading.py", "tests/test_trading.py"],
-          "dependsOn": ["agent-order", "agent-portfolio"]
+          "dependsOn": ["agent-order", "agent-portfolio"],
+          "test_cases": [],
+          "affected_components": []
         }
       ],
       "mergeOrder": ["agent-integration"]
@@ -176,6 +227,15 @@ Structure:
   "createdAt": "2026-02-18T00:00:00.000Z",
   "status": "pending_approval"
 }
+```
+
+### Step 10: Validate plan.json
+
+Run validation if scripts directory available:
+```bash
+if [ -n "${SCRIPTS_DIR:-}" ] && [ -f "${SCRIPTS_DIR}/plan.sh" ]; then
+  ${SCRIPTS_DIR}/plan.sh validate .claude/aad/plan.json
+fi
 ```
 
 ### 8. Generate state.json

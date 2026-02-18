@@ -8,16 +8,26 @@ Generalized reusable Claude Code custom commands + agents based on the proven Ag
 
 ```
 agent-team-automation/
+├── CLAUDE.md                    # プロジェクトコンテキスト
 ├── agents/
-│   └── tdd-worker.md          # TDD worker agent definition
-└── commands/
-    └── aad/
-        ├── init.md            # Project initialization
-        ├── plan.md            # Implementation plan generation
-        ├── execute.md         # Wave-based execution
-        ├── status.md          # Status check
-        ├── cleanup.md         # Resource cleanup
-        └── run.md             # End-to-end execution
+│   ├── tdd-worker.md           # TDDワーカー（強化版）
+│   ├── reviewer.md             # コードレビューエージェント
+│   ├── merge-resolver.md       # マージ競合解決エージェント
+│   ├── tester-red.md           # REDフェーズ専用エージェント
+│   └── implementer.md          # GREENフェーズ専用エージェント
+├── commands/aad/
+│   ├── init.md                 # プロジェクト初期化
+│   ├── plan.md                 # 計画生成（強化版）
+│   ├── execute.md              # Wave実行（強化版）
+│   ├── review.md               # コードレビュー（NEW）
+│   ├── status.md               # 状態確認
+│   ├── cleanup.md              # クリーンアップ（強化版）
+│   └── run.md                  # エンドツーエンド（強化版）
+└── scripts/
+    ├── worktree.sh             # Git worktree管理（NEW）
+    ├── tdd.sh                  # TDDパイプライン（NEW）
+    ├── plan.sh                 # 計画ヘルパー（NEW）
+    └── cleanup.sh              # クリーンアップ（NEW）
 ```
 
 ## 🚀 Installation
@@ -37,17 +47,36 @@ mkdir -p ~/.claude/commands/aad
 ln -s $(pwd)/commands/aad/*.md ~/.claude/commands/aad/
 ```
 
+### Scripts
+
+`scripts/` はプロジェクトリポジトリに配置するか、`PATH` に追加します:
+
+```bash
+# Option A: プロジェクトにコピー
+cp -r scripts/ /path/to/your/project/scripts/
+
+# Option B: PATH に追加（~/.zshrc / ~/.bashrc）
+export PATH="/path/to/agent-team-automation/scripts:$PATH"
+
+# Option C: 環境変数で明示指定
+export AAD_SCRIPTS_DIR="/path/to/agent-team-automation/scripts"
+```
+
+スクリプトが見つからない場合はインライン Git コマンドに自動フォールバックします。
+
 ## 🛠 Available Commands
 
 ### `/aad:init` - Project Initialization
 
 ```bash
-/aad:init <project-dir> [parent-branch]
+/aad:init [project-dir] [feature-name] [parent-branch]
 ```
 
+- `project-dir` を省略するとカレントディレクトリを使用
+- `project-dir` と見分けられない場合（パス形式でない文字列）は `feature-name` として扱う
 - Verify or initialize Git repository
 - Create parent branch (default: `aad/develop`)
-- Create worktree parent directory (`<project-dir>-wt/`)
+- Create worktree parent directory (`<project-dir>-{feature-name}-wt/` or `<project-dir>-wt/` if no feature-name)
 - Generate project config file (`.claude/aad/project-config.json`)
 
 ### `/aad:plan` - Plan Generation
@@ -89,21 +118,35 @@ ln -s $(pwd)/commands/aad/*.md ~/.claude/commands/aad/
 - Git worktree/branch state
 - Remaining tasks
 
+### `/aad:review` - Code Review
+
+```bash
+/aad:review [base-ref] [--skip-fix]
+```
+
+- 3-5並列レビューエージェントによるコードレビュー
+- カテゴリ: bug-detector, code-quality, test-coverage, performance, security
+- Critical/Warning問題の自動修正ループ（最大3回）
+
 ### `/aad:cleanup` - Resource Cleanup
 
 ```bash
-/aad:cleanup
+/aad:cleanup [--orphans]
 ```
 
 - Remove worktrees
 - Delete `feature/*` branches
 - Archive state files
+- `--orphans`: Clean up orphaned worktrees and branches
 
 ### `/aad:run` - End-to-End Execution
 
 ```bash
-/aad:run <project-dir> <input-source> [parent-branch]
+/aad:run [project-dir] <input-source> [parent-branch]
 ```
+
+- `project-dir` を省略するとカレントディレクトリを使用
+- Feature name is auto-derived from `<input-source>`.
 
 Auto-execute: `init` → `plan` → `execute` → `cleanup`
 
@@ -112,8 +155,12 @@ Auto-execute: `init` → `plan` → `execute` → `cleanup`
 ### Step-by-Step Execution
 
 ```bash
+# プロジェクトディレクトリに移動して実行（project-dir 省略）
+cd ~/my-project
+
 # 1. Initialize
-/aad:init ~/my-project
+/aad:init                          # カレントディレクトリを使用
+/aad:init auth-feature             # feature-name だけ指定
 
 # 2. Generate plan (using kiro spec)
 /aad:plan .kiro/specs/my-feature
@@ -128,6 +175,12 @@ Auto-execute: `init` → `plan` → `execute` → `cleanup`
 ### End-to-End Execution
 
 ```bash
+# カレントディレクトリで実行（project-dir 省略）
+cd ~/my-project
+/aad:run .kiro/specs/my-feature
+/aad:run requirements.md
+
+# 明示指定
 /aad:run ~/my-project .kiro/specs/my-feature
 ```
 
@@ -150,14 +203,67 @@ Auto-select optimal model based on task complexity:
 
 ### Git Worktree Management
 
-Each agent works in isolated worktree:
+Each agent works in isolated worktree. The worktree directory name includes the feature name, allowing multiple `aad` runs for different features simultaneously:
 
 ```
-my-project/           # Parent branch
-my-project-wt/
-  ├── agent-order/    # feature/order branch
-  ├── agent-portfolio/  # feature/portfolio branch
-  └── agent-api/      # feature/api branch
+my-project/                    # Parent repository
+my-project-auth-wt/            # feature "auth" の worktree
+  ├── agent-login/             # feature/login branch
+  └── agent-register/          # feature/register branch
+
+my-project-payment-wt/         # feature "payment" の worktree
+  └── agent-checkout/          # feature/checkout branch
+```
+
+Feature name is auto-derived from the input source:
+- `.kiro/specs/auth-feature/` → `auth-feature`
+- `requirements.md` → `requirements`
+- plain text → `unnamed`
+
+### Shell Script Foundation
+
+Robust shell script base for all Git operations:
+
+```bash
+# Framework detection
+scripts/tdd.sh detect-framework .
+
+# Run tests (auto-detected framework)
+scripts/tdd.sh run-tests .
+
+# Merge with spinlock (safe parallel merge)
+scripts/tdd.sh merge-to-parent <worktree> <agent> <branch> <project>
+
+# Worktree management
+scripts/worktree.sh create-task <base> <name> <branch> <parent>
+scripts/worktree.sh cleanup <base>
+```
+
+### Code Review System
+
+Parallel review with auto-fix:
+
+- 3-5 specialized reviewers run concurrently
+- Categories: bug-detector, code-quality, test-coverage, performance, security
+- Auto-fix loop for Critical/Warning issues (up to 3 rounds)
+- Cross-pattern detection (systematic bugs)
+
+### Spinlock-Based Parallel Merge
+
+Safe merging when multiple agents finish simultaneously:
+
+- Each agent merges itself using spinlock (`aad-merge.lock`)
+- 120-second timeout
+- Lock files auto-resolved with `--theirs`
+- Source file conflicts handled by `merge-resolver` agent
+
+### Draft PR Creation
+
+Automatic draft PR creation after implementation:
+
+```bash
+/aad:run ~/my-project requirements.md
+# Automatically creates draft PR with implementation summary
 ```
 
 ### TDD Cycle
@@ -178,7 +284,8 @@ Project config (created at initialization):
 ```json
 {
   "projectDir": "/absolute/path/to/project",
-  "worktreeDir": "/absolute/path/to/project-wt",
+  "worktreeDir": "/absolute/path/to/project-auth-wt",
+  "featureName": "auth",
   "parentBranch": "aad/develop",
   "createdAt": "2026-02-18T00:00:00.000Z",
   "status": "initialized"
@@ -191,6 +298,7 @@ Implementation plan (created during plan phase):
 
 ```json
 {
+  "featureName": "auth",
   "waves": [
     {
       "id": 0,
@@ -236,6 +344,25 @@ Execution state (updated during execution):
   "updatedAt": "2026-02-18T00:00:00.000Z"
 }
 ```
+
+## ⚙️ CLI Options & Environment Variables
+
+### `/aad:run` Options
+| Option | Description |
+|--------|-------------|
+| `--dry-run` | Generate plan only, don't execute |
+| `--keep-worktrees` | Skip worktree cleanup |
+| `--workers N` | Max parallel workers |
+| `--spec-only` | Generate requirements spec only |
+| `--skip-review` | Skip code review step |
+
+### Environment Variables
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AAD_WORKERS` | Number of parallel agents | auto |
+| `AAD_SKIP_COMPLETED` | Skip completed Waves | false |
+| `AAD_STRICT_TDD` | Enforce TDD cycle | false |
+| `AAD_SCRIPTS_DIR` | Path to scripts/ directory | auto-detect |
 
 ## 🔍 Implementation Track Record
 

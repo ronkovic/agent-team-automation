@@ -26,9 +26,33 @@ output_language: japanese
 Execute full Agent Team workflow: init → plan → execute → cleanup.
 
 ## Arguments
-- `$1`: `<project-dir>` - Target project directory (required)
-- `$2`: `<input-source>` - Requirements input (file/directory/kiro spec/text) (required)
+- `$1`: `[project-dir]` - Target project directory (optional, default: current directory)
+- `$2`: `<input-source>` - Requirements input (file/directory/kiro spec/text) (required if `$1` is project-dir)
 - `$3`: `[parent-branch]` - Parent branch name (optional, default: `aad/develop`)
+
+### Argument Auto-Detection
+
+If `$1` does not look like a path (no `/`, `./`, `../` prefix and not an existing directory),
+treat it as `input-source` and use the current working directory as `project-dir`:
+
+| Invocation | project-dir | input-source |
+|-----------|-------------|-------------|
+| `/aad:run requirements.md` | `pwd` | `requirements.md` |
+| `/aad:run .kiro/specs/auth-feature` | `pwd` | `.kiro/specs/auth-feature` |
+| `/aad:run ./my-project requirements.md` | `./my-project` | `requirements.md` |
+| `/aad:run "implement login feature"` | `pwd` | `"implement login feature"` |
+
+## CLI Options
+- `--dry-run`: Generate plan only, do not execute
+- `--keep-worktrees`: Skip worktree cleanup after execution
+- `--workers N`: Maximum parallel workers (default: auto, max CPU cores)
+- `--spec-only`: Generate requirements.md only, stop before plan.json
+- `--skip-review`: Skip code review step after each Wave
+
+## Environment Variables
+- `AAD_WORKERS`: Override --workers (number of parallel agents)
+- `AAD_SKIP_COMPLETED`: Skip already-completed Waves (true/false)
+- `AAD_STRICT_TDD`: Fail if TDD cycle is not followed (true/false)
 
 ## Workflow Phases
 
@@ -36,38 +60,83 @@ Execute full Agent Team workflow: init → plan → execute → cleanup.
 
 **Equivalent to `/aad:init`**:
 
-1. **Validate Arguments**
-   - Check `$1` and `$2` are specified
-   - Check `$1` directory exists
+1. **Parse Arguments with Auto-Detection**
 
-2. **Initialize Git**
+   ```bash
+   is_path() {
+     [[ "$1" == /* ]] || [[ "$1" == ./* ]] || [[ "$1" == ../* ]] || [ -d "$1" ]
+   }
+
+   if [ -z "$1" ]; then
+     echo "エラー: input-source を指定してください"
+     exit 1
+   elif is_path "$1" && [ -n "$2" ]; then
+     # $1 is a path and $2 exists → $1=project-dir, $2=input-source
+     PROJECT_DIR="$1"
+     INPUT_SOURCE="$2"
+     PARENT_BRANCH="${3:-aad/develop}"
+   else
+     # $1 is not a path (or $2 is absent) → $1=input-source, project-dir=cwd
+     PROJECT_DIR="."
+     INPUT_SOURCE="$1"
+     PARENT_BRANCH="${2:-aad/develop}"
+   fi
+   ```
+
+   - Check resolved `project-dir` directory exists
+
+2. **Feature Name Derivation**
+
+   Derive `feature-name` from input-source (`$2`):
+   1. If path is a directory: use basename (e.g., `.kiro/specs/auth-feature/` → `auth-feature`)
+   2. If path is a file: use filename without extension (e.g., `requirements.md` → `requirements`)
+   3. If plain text (not a path): use `unnamed`
+
+   Sanitize: replace spaces and special characters with hyphens, convert to lowercase.
+
+   ```bash
+   INPUT_SOURCE="$2"
+   if [ -d "$INPUT_SOURCE" ]; then
+     FEATURE_NAME=$(basename "${INPUT_SOURCE%/}")
+   elif [ -f "$INPUT_SOURCE" ]; then
+     FEATURE_NAME=$(basename "$INPUT_SOURCE" | sed 's/\.[^.]*$//')
+   else
+     FEATURE_NAME="unnamed"
+   fi
+   # Sanitize: lowercase, replace non-alphanumeric (except -) with hyphen
+   FEATURE_NAME=$(echo "$FEATURE_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/-\+/-/g' | sed 's/^-\|-$//g')
+   ```
+
+3. **Initialize Git**
    - Check if `.git` exists
    - Run `git init` if needed
    - Display status
 
-3. **Create Parent Branch**
+4. **Create Parent Branch**
    - Use `$3` or default `aad/develop`
    - Create branch if not exists
 
-4. **Create Worktree Directory**
-   - Create `{project-dir}-wt/`
+5. **Create Worktree Directory**
+   - Create `{project-dir}-{feature-name}-wt/`
    - Handle existing directory
 
-5. **Generate Config**
+6. **Generate Config**
    - Create `.claude/aad/project-config.json`:
    ```json
    {
      "projectDir": "{abs-path}",
-     "worktreeDir": "{abs-path}-wt",
+     "worktreeDir": "{abs-path}-{feature-name}-wt",
+     "featureName": "{feature-name}",
      "parentBranch": "{branch}",
      "createdAt": "{ISO8601}",
      "status": "initialized"
    }
    ```
 
-6. **Display Init Summary**
+7. **Display Init Summary**
    ```markdown
    ## Phase 1: 初期化完了
+   ✓ Feature名: {feature-name}
    ✓ Gitリポジトリ: {status}
    ✓ 親ブランチ: {branch}
    ✓ Worktreeディレクトリ: {path}
@@ -187,6 +256,17 @@ Execute full Agent Team workflow: init → plan → execute → cleanup.
    - テスト: {passed} passed, {failed} failed
    ```
 
+### Phase 3.5: Code Review
+
+After all Waves complete (unless --skip-review):
+```
+Invoke /aad:review logic with base-ref = initial branch before implementation
+Display review results
+If Critical issues found:
+  "⚠ コードレビューでCritical問題が検出されました。修正しますか？ (y/N):"
+  If yes: run auto-fix loop (up to 3 rounds)
+```
+
 ### Phase 4: Cleanup
 
 **Equivalent to `/aad:cleanup`**:
@@ -207,7 +287,7 @@ Execute full Agent Team workflow: init → plan → execute → cleanup.
    - Display archive location
 
 4. **Remove Worktree Directory**
-   - Delete `{project-dir}-wt/`
+   - Delete `{project-dir}-{feature-name}-wt/` (read path from project-config.json `worktreeDir`)
 
 5. **Display Cleanup Summary**
    ```markdown
@@ -216,6 +296,43 @@ Execute full Agent Team workflow: init → plan → execute → cleanup.
    ✓ ブランチ削除: {count}個
    ✓ アーカイブ: .claude/aad/archive/{timestamp}/
    ```
+
+### Phase 4.5: Create Draft Pull Request
+
+If gh command available and on git repository with remote:
+```bash
+# Check if gh is available
+if command -v gh &> /dev/null; then
+  # Get implementation summary
+  WAVE_COUNT=$(cat .claude/aad/state.json | jq '.completedWaves | length')
+
+  gh pr create --draft \
+    --title "feat: {implementation title from plan}" \
+    --body "$(cat <<'EOF'
+## 実装サマリー
+
+### Agent Team実装
+- Wave数: {WAVE_COUNT}
+- エージェント数: {AGENT_COUNT}
+- 実装ファイル数: {FILE_COUNT}
+
+### 実装内容
+{summary from plan.json tasks}
+
+### テスト
+{test results}
+
+### レビュー
+{review results if /aad:review was run}
+
+---
+*Generated by /aad:run*
+EOF
+)"
+
+  echo "✓ Draft PRを作成しました: {PR_URL}"
+fi
+```
 
 ### Phase 5: Final Report
 
@@ -354,10 +471,12 @@ Use clear phase headers:
 ```
 
 ## Safety & Fallback
-- **Missing Arguments**:
+- **Missing Arguments**: If no arguments at all, display usage and exit
   ```
-  使用方法: /aad:run <project-dir> <input-source> [parent-branch]
-  例: /aad:run ./my-project requirements.md
+  使用方法: /aad:run [project-dir] <input-source> [parent-branch]
+  例: /aad:run requirements.md                          # カレントディレクトリを使用
+  例: /aad:run .kiro/specs/auth-feature                 # feature-name は "auth-feature" に自動派生
+  例: /aad:run ./my-project requirements.md             # 明示指定
   ```
 - **User Rejection**: If user doesn't approve plan:
   ```

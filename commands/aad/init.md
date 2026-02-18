@@ -3,7 +3,7 @@ name: aad:init
 description: Initialize project for Agent Team parallel implementation
 requires_approval: false
 allowed-tools: Bash, Read, Write, Glob
-argument-hint: <project-dir> [parent-branch]
+argument-hint: <project-dir> [feature-name] [parent-branch]
 output_language: japanese
 ---
 
@@ -26,17 +26,31 @@ output_language: japanese
 Initialize specified project directory for Agent Team parallel implementation.
 
 ## Arguments
-- `$1`: `<project-dir>` - Target project directory (required)
-- `$2`: `[parent-branch]` - Parent branch name (default: `aad/develop`)
+- `$1`: `[project-dir]` - Target project directory (optional, default: current directory)
+- `$2`: `[feature-name]` - Feature name (optional, auto-derived from input source)
+- `$3`: `[parent-branch]` - Parent branch name (default: `aad/develop`)
+
+### Argument Auto-Detection
+
+If `$1` does not look like a path (no `/`, `./`, `../` prefix and not an existing directory),
+treat it as `feature-name` and use the current working directory as `project-dir`:
+
+| Invocation | project-dir | feature-name | parent-branch |
+|-----------|-------------|-------------|--------------|
+| `/aad:init` | `pwd` | — | `aad/develop` |
+| `/aad:init auth-feature` | `pwd` | `auth-feature` | `aad/develop` |
+| `/aad:init ./my-project` | `./my-project` | — | `aad/develop` |
+| `/aad:init ./my-project auth-feature` | `./my-project` | `auth-feature` | `aad/develop` |
 
 ## Execution Steps
 
-### 1. Validate Arguments
-- Check if `$1` is specified
-- Display error message and exit if not specified
+### 1. Parse Arguments
+- If `$1` is empty → `project-dir` = current directory, no feature-name
+- If `$1` starts with `/`, `./`, `../`, or is an existing directory → `project-dir` = `$1`, `feature-name` = `$2`, `parent-branch` = `$3`
+- Otherwise → `project-dir` = current directory, `feature-name` = `$1`, `parent-branch` = `$2`
 
 ### 2. Check Directory Existence
-- Check if `$1` directory exists
+- Check if resolved `project-dir` directory exists
 - Display error message and exit if not exists
 - Convert to absolute path for subsequent processing
 
@@ -50,7 +64,7 @@ Initialize specified project directory for Agent Team parallel implementation.
   - Notify recognized as Git repository
 
 ### 4. Set/Create Parent Branch
-- Use `aad/develop` as default if `$2` not specified
+- Use `aad/develop` as default if `$3` not specified
 - Check if specified parent branch already exists
 - If not exists:
   - Create parent branch
@@ -60,7 +74,8 @@ Initialize specified project directory for Agent Team parallel implementation.
   - Explicitly state won't overwrite
 
 ### 5. Create Worktree Parent Directory
-- Generate path for `<project-dir>-wt/` directory
+- If `$2` (feature-name) is specified, generate path for `<project-dir>-{feature-name}-wt/` directory
+- Otherwise, generate path for `<project-dir>-wt/` directory
 - Check if directory already exists
 - If not exists:
   - Create directory
@@ -75,12 +90,14 @@ Initialize specified project directory for Agent Team parallel implementation.
 ```json
 {
   "projectDir": "<absolute-path>",
-  "worktreeDir": "<absolute-path>-wt",
+  "worktreeDir": "<absolute-path>-{feature-name}-wt",
+  "featureName": "<feature-name>",
   "parentBranch": "<parent-branch-name>",
   "createdAt": "<ISO8601-timestamp>",
   "status": "initialized"
 }
 ```
+Note: `featureName` and the `{feature-name}` suffix in `worktreeDir` are omitted when `$2` is not specified (worktreeDir becomes `<absolute-path>-wt`).
 - Display config file creation completion message
 
 ### 7. Completion Notification
@@ -129,10 +146,12 @@ Provide output with following structure (in Japanese):
 - Clearly display result of each step
 
 ## Safety & Fallback
-- **Missing Arguments**: If `$1` not specified, display usage and exit
+- **No Arguments**: Use current directory as project-dir
   ```
-  使用方法: /aad:init <project-dir> [parent-branch]
-  例: /aad:init ./my-project aad/develop
+  # カレントディレクトリで初期化
+  /aad:init
+  /aad:init auth-feature              # feature-name のみ指定
+  /aad:init ./my-project auth-feature # 全て明示指定
   ```
 - **Directory Not Found**: If specified project directory doesn't exist, display error
   ```
@@ -149,15 +168,27 @@ Provide output with following structure (in Japanese):
 #!/bin/bash
 set -e
 
-# Check arguments
-if [ -z "$1" ]; then
-  echo "エラー: プロジェクトディレクトリを指定してください"
-  echo "使用方法: /aad:init <project-dir> [parent-branch]"
-  exit 1
-fi
+# Parse arguments with auto-detection
+is_path() {
+  [[ "$1" == /* ]] || [[ "$1" == ./* ]] || [[ "$1" == ../* ]] || [ -d "$1" ]
+}
 
-PROJECT_DIR="$1"
-PARENT_BRANCH="${2:-aad/develop}"
+if [ -z "$1" ]; then
+  # No args: use current directory
+  PROJECT_DIR="."
+  FEATURE_NAME=""
+  PARENT_BRANCH="aad/develop"
+elif is_path "$1"; then
+  # $1 is a path
+  PROJECT_DIR="$1"
+  FEATURE_NAME="${2:-}"
+  PARENT_BRANCH="${3:-aad/develop}"
+else
+  # $1 is not a path: treat as feature-name, use current directory
+  PROJECT_DIR="."
+  FEATURE_NAME="$1"
+  PARENT_BRANCH="${2:-aad/develop}"
+fi
 
 # Check directory existence
 if [ ! -d "$PROJECT_DIR" ]; then
@@ -167,7 +198,11 @@ fi
 
 # Get absolute path
 ABS_PROJECT_DIR=$(cd "$PROJECT_DIR" && pwd)
-WORKTREE_DIR="${ABS_PROJECT_DIR}-wt"
+if [ -n "$FEATURE_NAME" ]; then
+  WORKTREE_DIR="${ABS_PROJECT_DIR}-${FEATURE_NAME}-wt"
+else
+  WORKTREE_DIR="${ABS_PROJECT_DIR}-wt"
+fi
 
 echo "## プロジェクト初期化開始"
 echo "- プロジェクトディレクトリ: $ABS_PROJECT_DIR"
@@ -216,7 +251,19 @@ mkdir -p "$CONFIG_DIR"
 
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-cat > "$CONFIG_FILE" <<EOF
+if [ -n "$FEATURE_NAME" ]; then
+  cat > "$CONFIG_FILE" <<EOF
+{
+  "projectDir": "$ABS_PROJECT_DIR",
+  "worktreeDir": "$WORKTREE_DIR",
+  "featureName": "$FEATURE_NAME",
+  "parentBranch": "$PARENT_BRANCH",
+  "createdAt": "$TIMESTAMP",
+  "status": "initialized"
+}
+EOF
+else
+  cat > "$CONFIG_FILE" <<EOF
 {
   "projectDir": "$ABS_PROJECT_DIR",
   "worktreeDir": "$WORKTREE_DIR",
@@ -225,6 +272,7 @@ cat > "$CONFIG_FILE" <<EOF
   "status": "initialized"
 }
 EOF
+fi
 
 echo "✓ 設定ファイルを作成しました: $CONFIG_FILE"
 echo ""
