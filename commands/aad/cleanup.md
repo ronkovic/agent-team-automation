@@ -25,7 +25,7 @@ output_language: japanese
 Cleanup all Agent Team resources (worktrees, branches, state files).
 
 ## Arguments
-None (auto-detect from `.claude/aad/project-config.json`)
+- `--orphans`: Clean up orphaned worktrees and branches (in addition to normal cleanup)
 
 ## Execution Steps
 
@@ -49,7 +49,16 @@ None (auto-detect from `.claude/aad/project-config.json`)
 ### 4. Remove Worktrees
 - For each worktree:
   - Check for uncommitted changes
-  - Run `git worktree remove <path>` or `git worktree remove --force <path>`
+  - Use script if available:
+    ```bash
+    if [ -n "${SCRIPTS_DIR:-}" ]; then
+      ${SCRIPTS_DIR}/worktree.sh cleanup {worktreeDir}
+    else
+      # Inline fallback
+      git worktree remove <path>
+      git worktree remove --force <path>
+    fi
+    ```
   - Display progress
 - Continue on individual errors (don't stop entire process)
 
@@ -68,6 +77,21 @@ None (auto-detect from `.claude/aad/project-config.json`)
 ### 7. Remove Worktree Directory
 - Remove `<worktreeDir>` directory
 - Handle if directory not empty (show contents)
+
+### 9. Orphan Cleanup (if --orphans specified)
+
+If `--orphans` flag provided:
+```bash
+if [ -n "${SCRIPTS_DIR:-}" ]; then
+  ${SCRIPTS_DIR}/cleanup.sh orphans {projectDir}
+else
+  # Inline fallback
+  git worktree prune
+  git branch --merged | grep "feature/" | xargs git branch -d 2>/dev/null || true
+fi
+```
+
+Display cleaned orphans.
 
 ### 8. Display Completion Summary
 - Number of deleted worktrees

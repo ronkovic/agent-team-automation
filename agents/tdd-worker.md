@@ -16,6 +16,22 @@ You are an individual worker in a parallel Agent Team implementation. Strictly a
 - **Working Directory**: Worktree path specified in task instructions
 - **Branch**: Dedicated feature branch (already checked out)
 - **Parent Branch**: Shared code (core models, interfaces) already exists
+- **Scripts Directory**: {SCRIPTS_DIR} (auto-detected from project root)
+- **Isolation Rule**: Always use absolute paths. Never access files outside your worktree.
+
+## Setup (Before Starting Work)
+
+1. **Detect test framework**:
+   ```bash
+   FRAMEWORK=$(${SCRIPTS_DIR}/tdd.sh detect-framework ${WORKTREE_PATH})
+   echo "Detected framework: $FRAMEWORK"
+   ```
+
+2. **Verify worktree isolation**: Confirm you are in the correct worktree:
+   ```bash
+   pwd  # Should show worktree path
+   git branch --show-current  # Should show feature/{branch-name}
+   ```
 
 ## TDD Cycle
 
@@ -26,12 +42,14 @@ Strictly follow this cycle for all tasks:
 - Create test files (`tests/`, `__tests__/`, `*_test.py`, `*.test.ts`, etc.)
 - Write tests before implementation (naturally failing state)
 - Commit: `test(<module>): add tests for <feature>`
+- Auto-commit using: `{SCRIPTS_DIR}/tdd.sh commit-phase red <scope> <description> <worktree_path>`
 
 ### 2. GREEN (Test Pass)
 - Write **minimum implementation** to pass tests
 - Avoid excessive abstraction or future-proofing
 - Verify all tests pass
 - Commit: `feat(<module>): implement <feature>`
+- Auto-commit using: `{SCRIPTS_DIR}/tdd.sh commit-phase green <scope> <description> <worktree_path>`
 
 ### 3. REFACTOR
 - Improve code quality:
@@ -41,6 +59,7 @@ Strictly follow this cycle for all tasks:
   - Performance optimization (only when necessary)
 - Verify tests continue to pass
 - Commit: `refactor(<module>): <description>`
+- Auto-commit using: `{SCRIPTS_DIR}/tdd.sh commit-phase review <scope> <description> <worktree_path>`
 
 ### 4. REVIEW (Final Check)
 - Verify all tests pass
@@ -86,12 +105,28 @@ fix(portfolio): handle empty position list
 
 Task is complete when all of the following are met:
 
-1. ✅ All tests pass (`npm test`, `pytest`, `go test`, etc.)
+1. ✅ All tests pass (`{SCRIPTS_DIR}/tdd.sh run-tests <worktree_path>`)
 2. ✅ No regression in existing tests
 3. ✅ TDD cycle completed (RED→GREEN→REFACTOR→REVIEW)
 4. ✅ Proper commits following commit message convention
 5. ✅ `git add` + `git commit` completed
 6. ✅ Mark task as `completed` with `TaskUpdate`
+
+## Self-Merge (After All Tasks Complete)
+
+After all tasks are completed and tests pass, merge to parent branch:
+
+```bash
+{SCRIPTS_DIR}/tdd.sh merge-to-parent \
+  {WORKTREE_PATH} \
+  {AGENT_NAME} \
+  {PARENT_BRANCH} \
+  {PROJECT_DIR}
+```
+
+- This uses a spinlock (120s timeout) to safely merge without conflicts with other agents
+- If merge conflict occurs (non-lock files), merge-resolver agent will be invoked by orchestrator
+- Report merge result to team-lead
 
 ## Guidelines
 

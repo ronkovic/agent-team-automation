@@ -38,6 +38,22 @@ Execute implementation plan Wave by Wave with parallel agent teams.
 3. Determine Waves to execute (specific Wave or all pending)
 4. Verify plan status is valid
 
+### Phase 1.5: Detect Scripts Directory
+
+Detect the location of shell scripts:
+```bash
+# Find scripts directory relative to .claude/aad/project-config.json
+# or use environment variable if set
+if [ -n "${AAD_SCRIPTS_DIR:-}" ]; then
+  SCRIPTS_DIR="$AAD_SCRIPTS_DIR"
+elif [ -f "$(git rev-parse --show-toplevel)/scripts/worktree.sh" ]; then
+  SCRIPTS_DIR="$(git rev-parse --show-toplevel)/scripts"
+else
+  # Fallback: use inline git commands
+  SCRIPTS_DIR=""
+fi
+```
+
 ### Phase 2: Execute Wave 0 (Bootstrap)
 
 **Sequential execution by team-lead**:
@@ -73,10 +89,20 @@ TeamCreate(
 #### Step 2: Create Worktrees
 For each agent in Wave:
 ```bash
-git worktree add \
-  {worktreeDir}/{agent-name} \
-  -b feature/{branch-name} \
-  {parentBranch}
+# If SCRIPTS_DIR is available:
+if [ -n "${SCRIPTS_DIR}" ]; then
+  ${SCRIPTS_DIR}/worktree.sh create-task \
+    {worktreeDir} \
+    {agent-name} \
+    {branch-name} \
+    {parentBranch}
+else
+  # Inline fallback
+  git worktree add \
+    {worktreeDir}/{agent-name} \
+    -b feature/{branch-name} \
+    {parentBranch}
+fi
 ```
 
 Verify worktree creation and checkout.
@@ -142,21 +168,43 @@ Spawn all agents in parallel (single message with multiple Task calls).
 - Check TaskList for remaining tasks
 - Handle agent failures/blocks
 
-#### Step 6: Merge in Order
-Follow `mergeOrder` from plan.json:
+#### Step 6: Agent Self-Merge (Spinlock-Based)
 
-For each agent in merge order:
+Agents merge themselves to parent branch using spinlock. Orchestrator monitors.
+
+Each agent executes:
+```bash
+${SCRIPTS_DIR}/tdd.sh merge-to-parent \
+  {worktree-path} \
+  {agent-name} \
+  {parentBranch} \
+  {projectDir}
+```
+
+If merge conflict detected (non-lock files):
+1. Spawn merge-resolver agent:
+   ```
+   Task(
+     subagent_type: "general-purpose",
+     prompt: "You are a merge conflict resolver. Run in {projectDir}.
+              Use the merge-resolver agent definition.
+              Resolve conflicts in: {conflicting-files}
+              Do NOT commit."
+   )
+   ```
+2. After resolver completes, run `git commit` to finalize merge
+3. Update mergeLog in state.json
+
+Note: Lock files (.lock) are auto-resolved with --theirs by tdd.sh
+
+If SCRIPTS_DIR is empty (fallback):
+Follow `mergeOrder` from plan.json:
 ```bash
 cd {projectDir}
 git checkout {parentBranch}
 git merge --no-ff feature/{branch-name} \
   -m "merge(wave-{N}): {agent-description}"
 ```
-
-Verify merge success. If conflict:
-- Display conflict files
-- Pause for user resolution
-- Continue after resolution
 
 Update mergeLog in state.json:
 ```json
@@ -227,6 +275,17 @@ Display Wave N summary:
 
 ### 次のWave
 Wave {N+1} を開始します...
+```
+
+#### Step 11.5: Post-Wave Code Review (Optional)
+
+After Wave N merges, run code review if not skipped:
+```
+if [ "${AAD_SKIP_REVIEW:-false}" != "true" ]; then
+  # Invoke /aad:review for this Wave's changes
+  # (See commands/aad/review.md for full implementation)
+  echo "コードレビューを実行中..."
+fi
 ```
 
 ### Phase 4: Final Completion
