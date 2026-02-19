@@ -55,20 +55,34 @@ Classify changed files:
 
 ### Step 3: Spawn Parallel Review Agents
 
-Spawn 3-5 review agents based on changed file types:
+> **PROHIBITION**: 単一レビューアエージェントの使用は FATAL ERROR です。
+> 最低3つの個別 Task() 呼び出し（reviewer-bugs, reviewer-quality, reviewer-tests）が必須です。
+> `reviewer(コードレビュー実施)` のような単一エージェントは許可されません。
 
+**3a** Create team:
 ```
-TeamCreate(team_name: "review-wave-{timestamp}")
-
-Spawn in parallel:
-- Task(name: "reviewer-bugs", prompt: "Category: bug-detector. Diff: {diff}. Files: {files}. Use reviewer agent definition.")
-- Task(name: "reviewer-quality", prompt: "Category: code-quality. Diff: {diff}. Files: {files}. Use reviewer agent definition.")
-- Task(name: "reviewer-tests", prompt: "Category: test-coverage. Diff: {diff}. Files: {files}. Use reviewer agent definition.")
-- Task(name: "reviewer-security", prompt: "Category: security. Diff: {diff}. Files: {files}. Use reviewer agent definition.") [if Backend/Config files changed]
-- Task(name: "reviewer-perf", prompt: "Category: performance. Diff: {diff}. Files: {files}. Use reviewer agent definition.") [if Backend files changed]
+TeamCreate(team_name: "review-{timestamp}")
 ```
 
-Wait for all reviewers to complete.
+**3b** Spawn ALL reviewers in ONE message (minimum 3 Task calls):
+```
+Task(name: "reviewer-bugs",    prompt: "You are a bug-detector reviewer. Review this diff for bugs, logic errors, null pointer issues, off-by-one errors. Return findings as: severity (Critical/Warning/Info), file, line, description. Diff: {diff}. Files: {files}.")
+Task(name: "reviewer-quality", prompt: "You are a code-quality reviewer. Review this diff for code quality: naming, DRY violations, complexity, error handling patterns. Return findings as: severity, file, line, description. Diff: {diff}. Files: {files}.")
+Task(name: "reviewer-tests",   prompt: "You are a test-coverage reviewer. Review this diff for test coverage gaps, missing edge case tests, test quality issues. Return findings as: severity, file, line, description. Diff: {diff}. Files: {files}.")
+```
+If backend/config (.go/.py/.rs/.java/.rb/.yaml/.json/.env) changed, add:
+```
+Task(name: "reviewer-security", prompt: "You are a security reviewer. Review for SQL injection, XSS, auth issues, hardcoded secrets, CORS misconfig. Return findings as: severity, file, line, description. Diff: {diff}. Files: {files}.")
+```
+If backend files changed, add:
+```
+Task(name: "reviewer-perf", prompt: "You are a performance reviewer. Review for N+1 queries, missing indexes, unnecessary allocations, blocking operations. Return findings as: severity, file, line, description. Diff: {diff}. Files: {files}.")
+```
+
+**3c** VERIFY (MANDATORY):
+Confirm that 3+ reviewer agents were spawned. If fewer than 3 were spawned, re-execute 3b.
+
+**3d** Wait for all reviewers to complete. Then `TeamDelete()`.
 
 ### Step 4: Validate Findings
 

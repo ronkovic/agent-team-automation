@@ -6,12 +6,13 @@ usage() {
 使用方法: $(basename "$0") <サブコマンド> [引数...]
 
 サブコマンド:
-  create-parent <project_dir> <parent_branch> [<feature_name>]  worktreeベースディレクトリと親ブランチを作成
+  create-parent <project_dir> <parent_branch> [<feature_name>]   worktreeベースディレクトリと親ブランチを作成
   create-task <worktree_base> <agent_name> <branch_name> <parent_branch>  タスク用worktreeを作成
-  remove <worktree_path> [<branch_name>]          worktreeを削除
-  list [<worktree_base>]                          worktree一覧を表示
-  cleanup <worktree_base>                         全worktreeをクリーンアップ
-  resolve-gitdir <worktree_path>                  壊れた.gitファイルを修復
+  setup-symlinks <project_dir> <worktree_path>                   共有依存のsymlink作成（node_modules/.venv等）
+  remove <worktree_path> [<branch_name>]                         worktreeを削除
+  list [<worktree_base>]                                         worktree一覧を表示
+  cleanup <worktree_base>                                        全worktreeをクリーンアップ
+  resolve-gitdir <worktree_path>                                 壊れた.gitファイルを修復
 EOF
   exit 1
 }
@@ -28,7 +29,6 @@ cmd_create_parent() {
     worktree_base="${project_dir}-wt"
   fi
 
-  # worktreeベースディレクトリを作成
   if [[ ! -d "$worktree_base" ]]; then
     mkdir -p "$worktree_base"
     echo "✓ worktreeベースディレクトリを作成しました: $worktree_base"
@@ -36,22 +36,18 @@ cmd_create_parent() {
     echo "worktreeベースディレクトリは既に存在します: $worktree_base"
   fi
 
-  # 親ブランチが存在しない場合は作成
-  cd "$project_dir"
-  if ! git rev-parse --verify "$parent_branch" >/dev/null 2>&1; then
-    git branch "$parent_branch"
+  if ! git -C "$project_dir" rev-parse --verify "$parent_branch" >/dev/null 2>&1; then
+    git -C "$project_dir" branch "$parent_branch"
     echo "✓ 親ブランチを作成しました: $parent_branch"
   else
     echo "親ブランチは既に存在します: $parent_branch"
   fi
 
-  # project-config.json に worktreeDir を記録
   local config_dir="${project_dir}/.claude/aad"
   local config_file="${config_dir}/project-config.json"
   mkdir -p "$config_dir"
 
   if [[ -f "$config_file" ]]; then
-    # 既存のconfig.jsonを更新
     local tmp_file
     tmp_file=$(mktemp)
     if command -v jq >/dev/null 2>&1; then
@@ -60,34 +56,29 @@ cmd_create_parent() {
         "$config_file" > "$tmp_file"
       mv "$tmp_file" "$config_file"
     else
-      # jqがない場合はPythonで処理
       python3 -c "
 import json, sys
-with open('$config_file', 'r') as f:
+config_file, worktree_base, feature_name = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(config_file, 'r') as f:
     data = json.load(f)
-data['worktreeDir'] = '$worktree_base'
-if '$feature_name':
-    data['featureName'] = '$feature_name'
-with open('$config_file', 'w') as f:
+data['worktreeDir'] = worktree_base
+if feature_name:
+    data['featureName'] = feature_name
+with open(config_file, 'w') as f:
     json.dump(data, f, indent=2)
-"
+" "$config_file" "$worktree_base" "$feature_name"
     fi
   else
-    # 新規作成
-    if [[ -n "$feature_name" ]]; then
-      cat > "$config_file" <<JSONEOF
-{
-  "worktreeDir": "$worktree_base",
-  "featureName": "$feature_name"
-}
-JSONEOF
-    else
-      cat > "$config_file" <<JSONEOF
-{
-  "worktreeDir": "$worktree_base"
-}
-JSONEOF
-    fi
+    # jq/python3 非存在でもJSON特殊文字を安全にエスケープするためpython3を使用
+    python3 -c "
+import json, sys
+data = {'worktreeDir': sys.argv[1]}
+if sys.argv[2]:
+    data['featureName'] = sys.argv[2]
+with open(sys.argv[3], 'w') as f:
+    json.dump(data, f, indent=2)
+print()
+" "$worktree_base" "$feature_name" "$config_file"
   fi
   echo "✓ project-config.json に worktreeDir を記録しました"
 }
@@ -100,27 +91,69 @@ cmd_create_task() {
 
   local worktree_path="${worktree_base}/${agent_name}"
 
-  # 冪等性: 既存worktreeを削除してから再作成
   if [[ -d "$worktree_path" ]]; then
     git worktree remove --force "$worktree_path" 2>/dev/null || true
     echo "既存worktreeを削除しました: $worktree_path"
   fi
 
-  # 冪等性: 既存ブランチがあれば -b を使わない
-  if git rev-parse --verify "feature/${branch_name}" >/dev/null 2>&1; then
-    git worktree add "$worktree_path" "feature/${branch_name}"
+  # branch_name に既に feature/ が含まれる場合は二重付与を防止
+  local full_branch_name
+  if [[ "$branch_name" == feature/* ]]; then
+    full_branch_name="$branch_name"
   else
-    git worktree add "$worktree_path" -b "feature/${branch_name}" "$parent_branch"
+    full_branch_name="feature/${branch_name}"
+  fi
+
+  if git rev-parse --verify "$full_branch_name" >/dev/null 2>&1; then
+    git worktree add "$worktree_path" "$full_branch_name"
+  else
+    git worktree add "$worktree_path" -b "$full_branch_name" "$parent_branch"
   fi
   echo "✓ タスク用worktreeを作成しました: $worktree_path"
   echo "$worktree_path"
+}
+
+cmd_setup_symlinks() {
+  local project_dir="${1:?エラー: project_dir が必要です}"
+  local worktree_path="${2:?エラー: worktree_path が必要です}"
+
+  # symlink対象（dist/build/は除外 — 並列ビルドで上書き競合するため）
+  local symlink_targets=("node_modules" ".venv" "vendor")
+
+  # pnpm non-hoisted → node_modules除外（事前チェック）
+  if [[ -f "${project_dir}/.npmrc" ]] \
+    && grep -qE "node-linker\s*=\s*(pnp|isolated)" "${project_dir}/.npmrc" 2>/dev/null; then
+    symlink_targets=(".venv" "vendor")
+    echo "⚠ pnpm non-hoisted モード検出 — node_modules symlinkスキップ"
+  fi
+
+  # Yarn PnP / pnpm mode → node_modules除外（事前チェック）
+  if [[ -f "${project_dir}/.yarnrc.yml" ]] \
+    && grep -qE "nodeLinker:\s*(pnp|pnpm)" "${project_dir}/.yarnrc.yml" 2>/dev/null; then
+    symlink_targets=(".venv" "vendor")
+    echo "⚠ Yarn PnP/pnpm モード検出 — node_modules symlinkスキップ"
+  fi
+
+  local linked=0
+  for item in "${symlink_targets[@]}"; do
+    local src="${project_dir}/${item}"
+    local dst="${worktree_path}/${item}"
+    if [[ -d "$src" ]] && [[ ! -e "$dst" ]]; then
+      ln -s "$src" "$dst"
+      echo "✓ symlink作成: $dst → $src"
+      linked=$((linked + 1))
+    fi
+  done
+
+  if [[ $linked -eq 0 ]]; then
+    echo "symlink対象のディレクトリが見つかりませんでした（worktreeでのnpm installが必要かもしれません）"
+  fi
 }
 
 cmd_remove() {
   local worktree_path="${1:?エラー: worktree_path が必要です}"
   local branch_name="${2:-}"
 
-  # worktreeを削除
   if git worktree remove "$worktree_path" 2>/dev/null; then
     echo "✓ worktreeを削除しました: $worktree_path"
   else
@@ -129,13 +162,11 @@ cmd_remove() {
     echo "✓ worktreeを強制削除しました: $worktree_path"
   fi
 
-  # ブランチ削除（指定された場合）
   if [[ -n "$branch_name" ]]; then
     if git branch -d "feature/${branch_name}" 2>/dev/null; then
       echo "✓ ブランチを削除しました: feature/${branch_name}"
     else
-      echo "通常のブランチ削除に失敗しました。-D で再試行します..."
-      git branch -D "feature/${branch_name}"
+      git branch -D "feature/${branch_name}" 2>/dev/null || true
       echo "✓ ブランチを強制削除しました: feature/${branch_name}"
     fi
   fi
@@ -145,7 +176,7 @@ cmd_list() {
   local worktree_base="${1:-}"
 
   if [[ -n "$worktree_base" ]]; then
-    git worktree list | grep "$worktree_base" || echo "指定されたベースディレクトリ配下にworktreeはありません: $worktree_base"
+    git worktree list | grep -F "$worktree_base" || echo "指定ベースディレクトリ配下にworktreeはありません: $worktree_base"
   else
     git worktree list
   fi
@@ -154,45 +185,47 @@ cmd_list() {
 cmd_cleanup() {
   local worktree_base="${1:?エラー: worktree_base が必要です}"
 
-  # worktree_base配下の全worktreeを削除
+  # M8: 空ディレクトリのglobが展開されないケースを防止
+  shopt -s nullglob
+
   if [[ -d "$worktree_base" ]]; then
     for wt_dir in "$worktree_base"/*/; do
       if [[ -d "$wt_dir" ]]; then
         local wt_path
         wt_path=$(cd "$wt_dir" && pwd)
+
+        # M7: このworktreeに対応するブランチを削除前に記録
+        local wt_branch=""
+        wt_branch=$(git worktree list --porcelain | awk -v p="$wt_path" '
+          /^worktree/ { in_wt = ($2 == p) }
+          /^branch/ && in_wt { sub("refs/heads/", "", $2); print $2; in_wt=0 }
+        ' 2>/dev/null || true)
+
         if git worktree remove "$wt_path" 2>/dev/null; then
           echo "✓ worktreeを削除しました: $wt_path"
         else
           git worktree remove --force "$wt_path" 2>/dev/null || true
           echo "✓ worktreeを強制削除しました: $wt_path"
         fi
+
+        # M7: worktreeに対応するブランチのみ削除（他featureブランチに影響しない）
+        if [[ -n "$wt_branch" ]]; then
+          if git branch -d "$wt_branch" 2>/dev/null; then
+            echo "✓ ブランチを削除しました: $wt_branch"
+          else
+            git branch -D "$wt_branch" 2>/dev/null || true
+            echo "✓ ブランチを強制削除しました: $wt_branch"
+          fi
+        fi
       fi
     done
   fi
 
-  # feature/*ブランチを全削除
-  local branches
-  branches=$(git branch --list 'feature/*' | sed 's/^[* ]*//' || true)
-  if [[ -n "$branches" ]]; then
-    while IFS= read -r branch; do
-      if git branch -d "$branch" 2>/dev/null; then
-        echo "✓ ブランチを削除しました: $branch"
-      else
-        git branch -D "$branch" 2>/dev/null || true
-        echo "✓ ブランチを強制削除しました: $branch"
-      fi
-    done <<< "$branches"
-  else
-    echo "削除対象のfeature/*ブランチはありません"
-  fi
-
-  # worktree_baseディレクトリ自体を削除
   if [[ -d "$worktree_base" ]]; then
     rm -rf "$worktree_base"
     echo "✓ worktreeベースディレクトリを削除しました: $worktree_base"
   fi
 
-  # git worktree pruneを実行
   git worktree prune
   echo "✓ クリーンアップが完了しました"
 }
@@ -209,7 +242,7 @@ cmd_resolve_gitdir() {
   if [[ -f "$git_file" ]]; then
     echo ".gitファイルを確認中: $git_file"
     local gitdir
-    gitdir=$(cat "$git_file" | sed 's/^gitdir: //')
+    gitdir=$(sed 's/^gitdir: //' "$git_file")
     if [[ ! -d "$gitdir" ]]; then
       echo "警告: .gitファイルが指すディレクトリが存在しません: $gitdir"
       echo "git worktree repair を実行します..."
@@ -220,7 +253,6 @@ cmd_resolve_gitdir() {
   echo "✓ worktreeの修復が完了しました: $worktree_path"
 }
 
-# メインエントリポイント
 if [[ $# -lt 1 ]]; then
   usage
 fi
@@ -229,12 +261,13 @@ subcommand="$1"
 shift
 
 case "$subcommand" in
-  create-parent)  cmd_create_parent "$@" ;;
-  create-task)    cmd_create_task "$@" ;;
-  remove)         cmd_remove "$@" ;;
-  list)           cmd_list "$@" ;;
-  cleanup)        cmd_cleanup "$@" ;;
-  resolve-gitdir) cmd_resolve_gitdir "$@" ;;
+  create-parent)   cmd_create_parent "$@" ;;
+  create-task)     cmd_create_task "$@" ;;
+  setup-symlinks)  cmd_setup_symlinks "$@" ;;
+  remove)          cmd_remove "$@" ;;
+  list)            cmd_list "$@" ;;
+  cleanup)         cmd_cleanup "$@" ;;
+  resolve-gitdir)  cmd_resolve_gitdir "$@" ;;
   *)
     echo "エラー: 不明なサブコマンド: $subcommand"
     usage

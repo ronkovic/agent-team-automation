@@ -38,7 +38,7 @@ cmd_init() {
   local language="unknown"
   if [[ -f "${project_dir}/package.json" ]]; then
     language="javascript/typescript"
-  elif [[ -f "${project_dir}/pyproject.toml" ]] || [[ -f "${project_dir}/setup.py" ]]; then
+  elif [[ -f "${project_dir}/pyproject.toml" ]] || [[ -f "${project_dir}/setup.py" ]] || [[ -f "${project_dir}/requirements.txt" ]]; then
     language="python"
   elif [[ -f "${project_dir}/go.mod" ]]; then
     language="go"
@@ -56,9 +56,16 @@ cmd_init() {
       --arg currentBranch "$current_branch" \
       '{runId: $runId, projectDir: $projectDir, projectName: $projectName, language: $language, currentBranch: $currentBranch}'
   else
-    cat <<JSONEOF
-{"runId": "$run_id", "projectDir": "$project_dir", "projectName": "$project_name", "language": "$language", "currentBranch": "$current_branch"}
-JSONEOF
+    python3 -c "
+import json, sys
+data = {
+    'runId': sys.argv[1],
+    'projectDir': sys.argv[2],
+    'projectName': sys.argv[3],
+    'language': sys.argv[4],
+    'currentBranch': sys.argv[5]
+}
+print(json.dumps(data))" "$run_id" "$project_dir" "$project_name" "$language" "$current_branch"
   fi
 }
 
@@ -93,7 +100,7 @@ cmd_validate() {
     all_deps=$(jq -r '.waves[].agents[]?.dependsOn[]? // empty' "$plan_json_path" 2>/dev/null | sort -u)
     if [[ -n "$all_deps" ]]; then
       while IFS= read -r dep; do
-        if ! echo "$all_names" | grep -qx "$dep"; then
+        if ! echo "$all_names" | grep -Fqx "$dep"; then
           errors+=("依存関係エラー: '$dep' は存在しないagent名です")
         fi
       done <<< "$all_deps"
@@ -110,18 +117,19 @@ cmd_validate() {
       files_i=$(jq -r "[.waves[].agents[]?][$i].files[]? // empty" "$plan_json_path" 2>/dev/null)
       if [[ -n "$files_i" ]]; then
         while IFS= read -r file; do
-          all_files_with_owners+="${file}:${agent_name_i}"$'\n'
+          # タブ区切りでファイルパスとエージェント名を結合（パスに : が含まれる場合の問題を回避）
+          all_files_with_owners+="${file}"$'\t'"${agent_name_i}"$'\n'
         done <<< "$files_i"
       fi
     done
 
     if [[ -n "$all_files_with_owners" ]]; then
       local conflicting_files
-      conflicting_files=$(echo "$all_files_with_owners" | sed 's/:.*$//' | sort | uniq -d)
+      conflicting_files=$(echo "$all_files_with_owners" | cut -f1 | sort | uniq -d)
       if [[ -n "$conflicting_files" ]]; then
         while IFS= read -r conflict_file; do
           local owners
-          owners=$(echo "$all_files_with_owners" | grep "^${conflict_file}:" | sed 's/^.*://' | tr '\n' ', ' | sed 's/,$//')
+          owners=$(echo "$all_files_with_owners" | awk -F'\t' -v f="$conflict_file" '$1==f{print $2}' | tr '\n' ', ' | sed 's/,$//')
           errors+=("ファイル競合: '$conflict_file' が複数のagentに割り当てられています ($owners)")
         done <<< "$conflicting_files"
       fi
@@ -150,7 +158,7 @@ cmd_validate() {
     python3 -c "
 import json, sys
 
-with open('$plan_json_path', 'r') as f:
+with open(sys.argv[1], 'r') as f:
     plan = json.load(f)
 
 errors = []
@@ -210,8 +218,7 @@ if errors:
 else:
     print('✓ plan.json validation passed')
     sys.exit(0)
-" && exit 0 || exit 1
-    return
+" "$plan_json_path" && exit 0 || exit 1
   fi
 
   # 結果出力

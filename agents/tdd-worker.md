@@ -21,7 +21,18 @@ You are an individual worker in a parallel Agent Team implementation. Strictly a
 
 ## Setup (Before Starting Work)
 
-1. **Detect test framework**:
+1. **Detect scripts directory** (if not provided in task instructions):
+   ```bash
+   if [ -z "${SCRIPTS_DIR:-}" ]; then
+     PROJECT_DIR=$(git -C "${WORKTREE_PATH}" config --get core.worktree 2>/dev/null \
+       || git -C "${WORKTREE_PATH}" rev-parse --git-common-dir 2>/dev/null | xargs dirname)
+     if [ -f "${PROJECT_DIR}/scripts/tdd.sh" ]; then
+       SCRIPTS_DIR="${PROJECT_DIR}/scripts"
+     fi
+   fi
+   ```
+
+2. **Detect test framework**:
    ```bash
    FRAMEWORK=$(${SCRIPTS_DIR}/tdd.sh detect-framework ${WORKTREE_PATH})
    echo "Detected framework: $FRAMEWORK"

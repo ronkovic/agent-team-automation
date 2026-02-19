@@ -110,6 +110,7 @@ Create `.claude/aad/requirements.md` with:
 ### 4. Analyze Dependencies
 - Parse requirements for task dependencies
 - Identify shared code (core models, interfaces)
+- **Trace import chains**: For each planned file, determine what other planned files it will import. Build a dependency graph: `cli.py → commands.py → core.py` means cli depends on commands, commands depends on core.
 - Determine independent vs dependent tasks
 - Detect circular dependencies (error if found)
 
@@ -132,6 +133,56 @@ Create `.claude/aad/requirements.md` with:
 - Tasks depend only on previous Wave completions
 - Optimize for maximum parallelism
 - Consider file conflicts (avoid concurrent edits to same file)
+
+**CRITICAL — Import Dependency Rule**:
+If module A imports from module B (e.g., `from kakeibo.commands import add_record` in cli.py), then:
+- A and B MUST be in different Waves
+- B must be in an earlier Wave than A
+- Example: `cli.py` imports `commands.py` → commands in Wave 1, cli in Wave 2
+Violating this rule causes API name mismatches that require manual post-merge fixes.
+
+**Cross-Stack Agent Rule**:
+When frontend and backend agents are in the same Wave, the plan MUST include an `apiContract` field in that Wave object specifying:
+- `endpoints`: Array of `{ method, path, requestBody?, response?, statusCodes? }` where PATCH adds `"semantics": "partial-update"` (**REQUIRED** — not optional)
+  - Example PATCH: `{ "method": "PATCH", "path": "/api/items/:id", "semantics": "partial-update", "requestBody": "{ field1?, field2? }", "response": "Item", "statusCodes": { "200": "Updated", "404": "Not found" } }`
+- `errorFormat`: Shared error response shape
+- `sharedTypes`: Type definitions referenced by endpoints
+
+This field is **optional** for Waves with only one stack. When present, execute.md injects the contract into all agent prompts for that Wave.
+
+**apiContract 配置ルール (MANDATORY)**:
+
+`apiContract` は必ず **Wave オブジェクト内** に配置する。ルートレベルへの配置は無効:
+
+```json
+{
+  "waves": [
+    { "id": 0, "type": "bootstrap", "tasks": [...] },
+    {
+      "id": 1,
+      "type": "parallel",
+      "apiContract": {
+        "endpoints": [
+          {
+            "method": "PATCH",
+            "path": "/api/items/:id",
+            "semantics": "partial-update",
+            "requestBody": "{ field1?, field2? }",
+            "response": "Item"
+          }
+        ],
+        "errorFormat": "{ \"error\": \"string\" }",
+        "sharedTypes": { "Item": "{ id: number, ... }" }
+      },
+      "agents": [...]
+    }
+  ]
+}
+```
+
+**apiContract の許可キーは3つのみ**: `endpoints`, `errorFormat`, `sharedTypes`
+**PATCH endpoint に必須**: `"semantics": "partial-update"`
+**使用禁止キー**: `baseUrl`, `query`, `cors`, `transactionModel`, `taskSchema`, `statusCodes`, `errorSchema`, `statsSchema`, `transactionFields`
 
 ### 6. Model Assignment
 
@@ -178,6 +229,24 @@ Structure:
     {
       "id": 1,
       "type": "parallel",
+      "apiContract": {
+        "endpoints": [
+          {
+            "method": "GET", "path": "/api/orders",
+            "response": "[Order]", "statusCodes": { "200": "OK" }
+          },
+          {
+            "method": "PATCH", "path": "/api/orders/:id",
+            "semantics": "partial-update",
+            "requestBody": "{ quantity?, side?, status? }",
+            "response": "Order", "statusCodes": { "200": "Updated", "404": "Not found" }
+          }
+        ],
+        "errorFormat": "{ \"error\": \"string\" }",
+        "sharedTypes": {
+          "Order": "{ id: number, symbol: string, quantity: number, status: string }"
+        }
+      },
       "agents": [
         {
           "name": "agent-order",
@@ -229,14 +298,13 @@ Structure:
 }
 ```
 
-### Step 10: Validate plan.json
+**Write を呼ぶ前に、生成した JSON を以下の3点で確認する**:
 
-Run validation if scripts directory available:
-```bash
-if [ -n "${SCRIPTS_DIR:-}" ] && [ -f "${SCRIPTS_DIR}/plan.sh" ]; then
-  ${SCRIPTS_DIR}/plan.sh validate .claude/aad/plan.json
-fi
-```
+1. `apiContract` が波配列内 (`waves[N]`) にあり、ルートレベルにない ✓
+2. PATCH エンドポイントに `"semantics": "partial-update"` がある ✓
+3. `apiContract` 内のキーが `endpoints`/`errorFormat`/`sharedTypes` のみ ✓
+
+いずれかが満たされていなければ、Write を呼ばずにメモリ内で修正してから書き込む。
 
 ### 8. Generate state.json
 

@@ -1,0 +1,13 @@
+{
+  "name": "aad-v2",
+  "version": "2.0.0",
+  "description": "Wave-based parallel TDD implementation toolkit using Agent Teams and Git worktrees",
+  "skills": ["skills/aad"],
+  "commands": ["commands/aad.md"],
+  "agents": [
+    "agents/aad-tdd-worker.md",
+    "agents/aad-planner.md",
+    "agents/aad-reviewer.md",
+    "agents/aad-merge-resolver.md"
+  ]
+}

@@ -33,50 +33,218 @@ Execute implementation plan Wave by Wave with parallel agent teams.
 ## Execution Flow
 
 ### Phase 1: Load Plan
-1. Read `.claude/aad/plan.json`
-2. Read `.claude/aad/state.json` (or create if not exists)
-3. Determine Waves to execute (specific Wave or all pending)
-4. Verify plan status is valid
 
-### Phase 1.5: Detect Scripts Directory
+#### Step 0: Detect Scripts Directory (Required First)
 
-Detect the location of shell scripts:
+Detect the location of shell scripts **before anything else**:
 ```bash
-# Find scripts directory relative to .claude/aad/project-config.json
-# or use environment variable if set
 if [ -n "${AAD_SCRIPTS_DIR:-}" ]; then
   SCRIPTS_DIR="$AAD_SCRIPTS_DIR"
 elif [ -f "$(git rev-parse --show-toplevel)/scripts/worktree.sh" ]; then
   SCRIPTS_DIR="$(git rev-parse --show-toplevel)/scripts"
 else
-  # Fallback: use inline git commands
+  # **Last resort**: inline git commands only when scripts/worktree.sh is not found
   SCRIPTS_DIR=""
+  echo "警告: scripts/worktree.sh が見つかりません。インラインgitコマンドで代用します。"
 fi
 ```
 
+**IMPORTANT**: Pass `SCRIPTS_DIR` to all agent prompts in Step 4.
+
+1. Read `.claude/aad/plan.json`
+2. Read `.claude/aad/state.json` (or create if not exists)
+3. Determine Waves to execute (specific Wave or all pending)
+4. Verify plan status is valid
+
+### Phase 1.5: Install Dependencies
+
+Before executing any Wave, install project dependencies to ensure test runners are available:
+```bash
+# Python: uv で仮想環境を作成（pip3/python3 バージョン不一致を回避）
+if [ -f "pyproject.toml" ] || [ -f "setup.py" ] || [ -f "requirements.txt" ]; then
+  if command -v uv >/dev/null 2>&1; then
+    uv venv .venv 2>/dev/null || true  # 既存の場合はスキップ
+    UV_INSTALL="uv pip install --python .venv/bin/python"
+    if [ -f "pyproject.toml" ] && grep -q '\[.*test\]' pyproject.toml 2>/dev/null; then
+      $UV_INSTALL -e ".[dev]" 2>/dev/null || $UV_INSTALL -e ".[test]" 2>/dev/null || $UV_INSTALL pytest
+    elif [ -f "requirements.txt" ]; then
+      $UV_INSTALL -r requirements.txt
+    else
+      $UV_INSTALL pytest
+    fi
+    PYTHON=".venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -m pip install --user pytest 2>/dev/null || true
+    PYTHON="python3"
+  else
+    echo "⚠ 警告: python3/uv がインストールされていません。Pythonテストはスキップされます。"
+  fi
+  echo "Python実行環境: ${PYTHON:-未検出}"
+fi
+
+# Node.js / TypeScript
+if [ -f "package.json" ]; then
+  if command -v npm >/dev/null 2>&1; then
+    npm install
+  else
+    echo "⚠ 警告: npm がインストールされていません。Node.js/TypeScriptのビルドとテストはスキップされます。"
+  fi
+fi
+
+# Go
+if [ -f "go.mod" ]; then
+  if command -v go >/dev/null 2>&1; then
+    go mod download
+  else
+    echo "⚠ 警告: go がインストールされていません。Goのビルドとテストはスキップされます。"
+  fi
+fi
+
+# Rust
+if [ -f "Cargo.toml" ]; then
+  if command -v cargo >/dev/null 2>&1; then
+    cargo fetch 2>/dev/null || true
+  else
+    echo "⚠ 警告: cargo がインストールされていません。Rustのビルドとテストはスキップされます。"
+  fi
+fi
+
+# Ruby
+if [ -f "Gemfile" ]; then
+  if command -v bundle >/dev/null 2>&1; then
+    bundle install
+  else
+    echo "⚠ 警告: bundle がインストールされていません。Rubyの依存解決とテストはスキップされます。"
+  fi
+fi
+
+# Java (Maven / Gradle)
+if [ -f "pom.xml" ]; then
+  if command -v mvn >/dev/null 2>&1; then
+    mvn dependency:resolve -q
+  else
+    echo "⚠ 警告: mvn がインストールされていません。Javaのビルドとテストはスキップされます。"
+  fi
+elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+  if command -v gradle >/dev/null 2>&1; then
+    gradle dependencies --quiet 2>/dev/null || true
+  else
+    echo "⚠ 警告: gradle がインストールされていません。Javaのビルドとテストはスキップされます。"
+  fi
+fi
+```
+
+**IMPORTANT**: Pass the resolved `$PYTHON` path to all agent prompts so agents use the same interpreter.
+
 ### Phase 2: Execute Wave 0 (Bootstrap)
+
+**IMPORTANT: Wave 0 does NOT use a worktree or feature branch.**
+Work directly on the parent branch ({parentBranch}) in the main project directory.
+**Do NOT create a worktree. Do NOT create a feature branch. Do NOT spawn agents.**
 
 **Sequential execution by team-lead**:
 
-1. Get Wave 0 tasks from plan.json
-2. For each task in Wave 0:
-   - Display task description
-   - Implement shared code (core models, interfaces)
-   - Run tests
-   - Commit to parent branch directly
-   - Update progress
-3. Mark Wave 0 as completed in state.json
-4. Display Wave 0 completion summary
+**Before starting TDD cycle, create `.gitignore` if it does not exist**:
+```bash
+if [ ! -f .gitignore ]; then
+  cat > .gitignore << 'GITIGNORE'
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+node_modules/
+GITIGNORE
+  git add .gitignore && git commit -m "chore: add .gitignore"
+fi
+```
 
-**Wave 0 Commit Convention**:
+**After Wave 0 completes, re-install dependencies for any newly created manifest files**:
+```bash
+# Python
+if [ -f "pyproject.toml" ] || [ -f "setup.py" ] || [ -f "requirements.txt" ]; then
+  if command -v uv >/dev/null 2>&1; then
+    uv venv .venv 2>/dev/null || true
+    UV_INSTALL="uv pip install --python .venv/bin/python"
+    if [ -f "pyproject.toml" ] && grep -q '\[.*test\]' pyproject.toml 2>/dev/null; then
+      $UV_INSTALL -e ".[dev]" 2>/dev/null || $UV_INSTALL -e ".[test]" 2>/dev/null || $UV_INSTALL pytest
+    elif [ -f "requirements.txt" ]; then
+      $UV_INSTALL -r requirements.txt
+    else
+      $UV_INSTALL pytest
+    fi
+    PYTHON=".venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -m pip install --user pytest 2>/dev/null || true
+    PYTHON="python3"
+  fi
+fi
+
+# Node.js / TypeScript
+if [ -f "package.json" ]; then
+  if command -v npm >/dev/null 2>&1; then
+    npm install
+  fi
+fi
+
+# Go
+if [ -f "go.mod" ]; then
+  if command -v go >/dev/null 2>&1; then
+    go mod download
+  fi
+fi
+
+# Rust / Ruby / Java — same pattern as Phase 1.5 Step 0
 ```
-feat(core): implement <description>
-test(core): add tests for <description>
+
+1. Get Wave 0 tasks from plan.json
+2. For each task in Wave 0, follow TDD cycle with **separate commits per phase**:
+   - **RED**: Write failing tests first → **MUST commit NOW** (do not combine with GREEN):
+     `test(core): add tests for <description>`
+   - **GREEN**: Write minimum implementation to pass tests → **MUST commit NOW** (do not combine with RED):
+     `feat(core): implement <description>`
+   - **REFACTOR**: Improve code quality, verify tests still pass → commit if changed:
+     `refactor(core): <description>`
+3. **Install dependencies for newly created files** (MANDATORY — Wave 0 creates package.json / go.mod):
+   ```bash
+   cd {projectDir}
+
+   # Frontend (package.json created in Wave 0)
+   if [ -f "frontend/package.json" ] && [ ! -d "frontend/node_modules" ]; then
+     (cd frontend && npm install)
+   elif [ -f "package.json" ] && [ ! -d "node_modules" ]; then
+     npm install
+   fi
+
+   # Backend (go.mod created in Wave 0)
+   if [ -f "backend/go.mod" ] && command -v go >/dev/null 2>&1; then
+     (cd backend && go mod download)
+   elif [ -f "go.mod" ] && command -v go >/dev/null 2>&1; then
+     go mod download
+   fi
+   ```
+4. Mark Wave 0 as completed in state.json
+5. Display Wave 0 completion summary
+
+**Wave 0 Commit Convention** (separate commits per phase — do NOT combine):
 ```
+test(core): add tests for <description>    ← RED phase commit
+feat(core): implement <description>        ← GREEN phase commit
+refactor(core): <description>             ← REFACTOR phase commit (if applicable)
+```
+**IMPORTANT: Never combine RED and GREEN into a single commit.**
 
 ### Phase 3: Execute Wave 1+ (Parallel)
 
 For each Wave N (N >= 1):
+
+**Save Wave baseline for post-Wave review**:
+```bash
+WAVE_START_REF=$(git rev-parse HEAD)
+```
 
 #### Step 1: Create Team
 ```
@@ -119,8 +287,12 @@ TaskCreate(
 
 Set dependencies if specified in plan.json.
 
-#### Step 4: Spawn Agents in Parallel
-For each agent:
+#### Step 4: Spawn ALL Agents Simultaneously
+
+**CRITICAL: Include ALL Task() calls in a SINGLE message. Do NOT batch or loop.**
+All agents must be spawned in one response for true parallelism.
+
+For each agent, embed the full tdd-worker instructions in the prompt:
 ```
 Task(
   subagent_type: "general-purpose",
@@ -128,39 +300,112 @@ Task(
   name: "{agent-name}",
   model: "{opus|sonnet|haiku}",  # from plan.json
   prompt: """
-    You are {agent-name} working on Wave {N}.
-    
+    You are {agent-name} working on Wave {N} as a TDD Worker.
+
     **Working Directory**: {worktree-path}
     **Branch**: feature/{branch-name}
-    **Model**: {model}
+    **Parent Branch**: {parentBranch}
+    **Project Directory**: {projectDir}
+    **Scripts Directory**: {SCRIPTS_DIR}
     **Tasks**: {task-list}
     **Files**: {file-list}
-    
-    Follow TDD methodology (refer to tdd-worker agent definition):
-    1. RED: Write tests first
-    2. GREEN: Implement minimum code to pass
-    3. REFACTOR: Improve code quality
-    4. REVIEW: Verify all tests pass
-    
     **Interface References**: {interface-files}
     **Dependencies**: {dependency-info}
-    
-    **Commit Convention**:
-    - test({module}): add tests for {feature}
-    - feat({module}): implement {feature}
-    - refactor({module}): {description}
-    
-    **Completion**:
-    - All tests pass
-    - Code committed
-    - TaskUpdate with status=completed
-    
+
+    ## API Contract (Cross-Stack Parallel Agents)
+
+    **If the current Wave has an `apiContract` field in plan.json**, inject its contents:
+    - List each endpoint: method, path, request body, response, status codes
+    - PATCH endpoints: emphasize "partial-update — only fields present in request body are updated, omitted fields retain current values"
+    - Include errorFormat and sharedTypes definitions
+    - You MUST follow this contract exactly. Do not deviate.
+
+    **FALLBACK**: If `apiContract` exists at plan.json **root level** (incorrect position but still usable),
+    inject the root-level contract into ALL waves that contain both frontend and backend agents.
+    This ensures cross-stack agents receive the API contract even if plan generation placed it incorrectly.
+
+    **If no `apiContract` is defined** (single-stack Wave), use fallback:
+    - PATCH endpoints MUST use partial update semantics
+    - Follow standard HTTP method semantics: POST=create, PUT=full replace, PATCH=partial update
+    - Do NOT add required field validation for PATCH that rejects subset requests
+
+    ## Setup (Before Starting Work)
+
+    1. **Detect test framework** (if SCRIPTS_DIR is set):
+       FRAMEWORK=$({SCRIPTS_DIR}/tdd.sh detect-framework {worktree-path})
+       If SCRIPTS_DIR is empty, detect manually (pytest.ini → pytest, package.json → jest, go.mod → go test).
+
+    2. **Verify worktree isolation**:
+       pwd  # Must show {worktree-path}
+       git branch --show-current  # Must show feature/{branch-name}
+
+    ## TDD Cycle (MANDATORY — Do NOT skip any phase)
+
+    ### 1. RED (Test Failure)
+    - Write tests BEFORE any implementation
+    - Tests must naturally fail at this stage
+    - **MUST commit NOW** (do not combine with GREEN):
+      test(<module>): add tests for <feature>
+    - Auto-commit: {SCRIPTS_DIR}/tdd.sh commit-phase red <scope> <description> {worktree-path}
+
+    ### 2. GREEN (Test Pass)
+    - Write minimum implementation to pass tests only
+    - No premature optimization or abstraction
+    - Verify all tests pass
+    - **MUST commit NOW** (do not combine with RED):
+      feat(<module>): implement <feature>
+    - Auto-commit: {SCRIPTS_DIR}/tdd.sh commit-phase green <scope> <description> {worktree-path}
+
+    ### 3. REFACTOR
+    - Improve code quality (DRY, naming, structure)
+    - Verify tests still pass after each change
+    - Commit: refactor(<module>): <description>
+    - Auto-commit: {SCRIPTS_DIR}/tdd.sh commit-phase review <scope> <description> {worktree-path}
+
+    ### 4. REVIEW (Final Check)
+    - Run full test suite: {SCRIPTS_DIR}/tdd.sh run-tests {worktree-path}
+    - Check for regressions in existing tests
+    - Add tests for uncovered edge cases
+
+    ### 5. TEST QUALITY RULES
+    - **Never inject mocks at module level** (e.g., `sys.modules[...] = mock`)
+    - Use pytest fixtures (`monkeypatch`, `mock.patch`) scoped to individual tests
+    - Each test file must be independently runnable: `pytest tests/test_foo.py`
+    - Do NOT create stub/mock modules for code implemented by other agents
+
+    ## Commit Convention (Conventional Commits)
+
+    Format: <type>(<scope>): <description>
+    - test: Add/modify tests
+    - feat: New feature implementation
+    - refactor: Refactoring without feature change
+    - fix: Bug fix
+
+    ## Self-Merge (After All Tasks Complete)
+
+    {SCRIPTS_DIR}/tdd.sh merge-to-parent \
+      {worktree-path} \
+      {agent-name} \
+      {parentBranch} \
+      {projectDir}
+
+    Uses spinlock (120s timeout) to safely serialize concurrent merges.
+    Report merge result to team-lead via SendMessage.
+
+    ## Completion Criteria
+
+    All of the following must be met before marking task as completed:
+    1. All tests pass
+    2. No regression in existing tests
+    3. TDD cycle completed (RED -> GREEN -> REFACTOR -> REVIEW)
+    4. All commits follow Conventional Commits format
+    5. Self-merge to {parentBranch} completed
+    6. TaskUpdate with status=completed
+
     Work autonomously. Report only when complete or blocked.
   """
 )
 ```
-
-Spawn all agents in parallel (single message with multiple Task calls).
 
 #### Step 5: Monitor Completion
 - Wait for all agents to complete
@@ -220,8 +465,16 @@ Update mergeLog in state.json:
 #### Step 7: Cleanup Worktrees
 For each agent after successful merge:
 ```bash
-git worktree remove {worktreeDir}/{agent-name}
-git branch -d feature/{branch-name}  # only if fully merged
+if [ -n "${SCRIPTS_DIR}" ]; then
+  ${SCRIPTS_DIR}/worktree.sh remove {worktreeDir}/{agent-name} {branch-name}
+else
+  # Inline fallback with --force retry
+  git worktree remove {worktreeDir}/{agent-name} 2>/dev/null \
+    || git worktree remove --force {worktreeDir}/{agent-name} 2>/dev/null \
+    || rm -rf {worktreeDir}/{agent-name}
+  git worktree prune
+  git branch -d feature/{branch-name} 2>/dev/null || true
+fi
 ```
 
 #### Step 8: Shutdown Agents
@@ -241,8 +494,9 @@ Wait for shutdown approval.
 TeamDelete()
 ```
 
-#### Step 10: Update State
-Update state.json:
+#### Step 10: Update State & Reinstall Dependencies
+
+**10a** Update state.json:
 ```json
 {
   "currentWave": N + 1,
@@ -256,6 +510,42 @@ Update state.json:
   },
   "updatedAt": "{ISO8601}"
 }
+```
+
+**10b** Reinstall dependencies in {projectDir} (MANDATORY — each Wave merge may introduce new manifest files):
+```bash
+cd {projectDir}
+
+# Check frontend/
+if [ -f "frontend/package.json" ] && [ ! -d "frontend/node_modules" ]; then
+  (cd frontend && npm install)
+elif [ -f "package.json" ] && [ ! -d "node_modules" ]; then
+  npm install
+fi
+
+# Check backend/
+if [ -f "backend/go.mod" ] && command -v go >/dev/null 2>&1; then
+  (cd backend && go mod download)
+elif [ -f "go.mod" ] && command -v go >/dev/null 2>&1; then
+  go mod download
+fi
+
+# Python
+if [ -f "pyproject.toml" ] || [ -f "setup.py" ] || [ -f "requirements.txt" ]; then
+  if command -v uv >/dev/null 2>&1; then
+    uv venv .venv 2>/dev/null || true
+    UV_INSTALL="uv pip install --python .venv/bin/python"
+    if [ -f "pyproject.toml" ] && grep -q '\[.*test\]' pyproject.toml 2>/dev/null; then
+      $UV_INSTALL -e ".[dev]" 2>/dev/null || $UV_INSTALL -e ".[test]" 2>/dev/null || $UV_INSTALL pytest
+    elif [ -f "requirements.txt" ]; then
+      $UV_INSTALL -r requirements.txt
+    else
+      $UV_INSTALL pytest
+    fi
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -m pip install --user pytest 2>/dev/null || true
+  fi
+fi
 ```
 
 #### Step 11: Wave Completion Report
@@ -277,16 +567,89 @@ Display Wave N summary:
 Wave {N+1} を開始します...
 ```
 
-#### Step 11.5: Post-Wave Code Review (Optional)
+#### Step 11.5: Post-Wave Code Review (Delegated to Review Coordinator)
 
 After Wave N merges, run code review if not skipped:
-```
-if [ "${AAD_SKIP_REVIEW:-false}" != "true" ]; then
-  # Invoke /aad:review for this Wave's changes
-  # (See commands/aad/review.md for full implementation)
-  echo "コードレビューを実行中..."
+
+```bash
+if [ "${AAD_SKIP_REVIEW:-false}" = "true" ]; then
+  echo "ℹ コードレビューをスキップしました (AAD_SKIP_REVIEW=true)"
+  # → 次の Wave または Phase 4 へ進む
 fi
 ```
+
+If not skipped, **spawn review coordinator** (dedicated agent with fresh context):
+
+```bash
+DIFF=$(git diff ${WAVE_START_REF}..HEAD)
+CHANGED_FILES=$(git diff --name-only ${WAVE_START_REF}..HEAD)
+COMMITS=$(git log --oneline ${WAVE_START_REF}..HEAD)
+```
+
+```
+Task(
+  subagent_type: "general-purpose",
+  name: "review-coordinator-wave-{N}",
+  prompt: """
+  You are the Code Review Coordinator for Wave {N}.
+
+  **Project**: {projectDir}
+  **Wave**: {N}
+  **Changed Files**: {CHANGED_FILES}
+  **Commits**: {COMMITS}
+  **Diff**: {DIFF}
+
+  ## YOUR MISSION
+
+  Perform a PARALLEL code review using 3-5 specialized reviewer agents.
+  You MUST NOT review the code yourself. You are a COORDINATOR, not a reviewer.
+
+  ## EXECUTION STEPS
+
+  1. Create review team:
+     TeamCreate(team_name: "review-wave-{N}-{timestamp}")
+
+  2. Classify changed files:
+     - Backend: .py, .go, .rs, .java, .rb
+     - Frontend: .ts, .tsx, .js, .jsx, .vue
+     - Config: .yaml, .yml, .json, .toml, .env
+     - Tests: *_test.*, *.test.*, tests/, __tests__/
+
+  3. Spawn ALL reviewers in ONE message (minimum 3 Task calls):
+     Task(name: "reviewer-bugs",    subagent_type: "general-purpose", prompt: "You are a bug-detector reviewer. Review this diff for bugs, logic errors, null pointer issues, off-by-one errors. Diff: {DIFF}. Files: {CHANGED_FILES}. Return findings as: severity (Critical/Warning/Info), file, line, description.")
+     Task(name: "reviewer-quality", subagent_type: "general-purpose", prompt: "You are a code-quality reviewer. Review this diff for code quality: naming, DRY violations, complexity, error handling patterns. Diff: {DIFF}. Files: {CHANGED_FILES}. Return findings as: severity, file, line, description.")
+     Task(name: "reviewer-tests",   subagent_type: "general-purpose", prompt: "You are a test-coverage reviewer. Review this diff for test coverage gaps, missing edge case tests, test quality issues. Diff: {DIFF}. Files: {CHANGED_FILES}. Return findings as: severity, file, line, description.")
+
+     If backend/config files changed, also spawn:
+     Task(name: "reviewer-security", subagent_type: "general-purpose", prompt: "You are a security reviewer. Review for SQL injection, XSS, auth issues, hardcoded secrets, CORS misconfig. Diff: {DIFF}. Files: {CHANGED_FILES}.")
+
+     If backend files changed, also spawn:
+     Task(name: "reviewer-perf", subagent_type: "general-purpose", prompt: "You are a performance reviewer. Review for N+1 queries, missing indexes, unnecessary allocations, blocking operations. Diff: {DIFF}. Files: {CHANGED_FILES}.")
+
+  4. Wait for all reviewers to complete. Collect all findings.
+
+  5. Validate findings:
+     - Cross-check Critical findings with actual code (Grep)
+     - Downgrade false positives
+     - Deduplicate across reviewers
+
+  6. TeamDelete()
+
+  7. Return final review report:
+     ## Wave {N} コードレビュー結果
+     - Critical: N件
+     - Warning: N件
+     - Info: N件
+     [detailed findings]
+
+  8. If Critical issues found:
+     Fix them directly (up to 3 rounds of fix → test → verify).
+     Commit fixes: fix(review): {description}
+  """
+)
+```
+
+Wait for review-coordinator to complete. Display results.
 
 ### Phase 4: Final Completion
 
