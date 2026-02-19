@@ -61,13 +61,16 @@ fi
 # gh が使えない場合はスキップ
 if ! command -v gh >/dev/null 2>&1; then
   echo "⚠ gh コマンドが見つかりません。PR作成をスキップします。"
-  # pr-output.json をスキップ状態で書いて終了
-  exit 0  # pr-output.json に skipped ステータスを書いてから終了
+  mkdir -p "${PROJECT_DIR}/.claude/aad/phases"
+  echo '{"status":"skipped","reason":"gh unavailable"}' > "${PROJECT_DIR}/.claude/aad/phases/pr-output.json"
+  exit 0
 fi
 
 # remote が存在しない場合はスキップ
 if ! git -C "$PROJECT_DIR" remote get-url origin >/dev/null 2>&1; then
   echo "⚠ remote origin が見つかりません。PR作成をスキップします。"
+  mkdir -p "${PROJECT_DIR}/.claude/aad/phases"
+  echo '{"status":"skipped","reason":"gh unavailable"}' > "${PROJECT_DIR}/.claude/aad/phases/pr-output.json"
   exit 0
 fi
 ```

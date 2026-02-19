@@ -4,6 +4,10 @@
 # ゲート: post-init, post-plan, post-execute, post-review
 set -euo pipefail
 
+if ! command -v jq >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+  echo "GATE FAIL: jq または python3 が必要です" >&2; exit 1
+fi
+
 GATE="${1:?使用方法: phase-gate.sh <gate> <project_dir>}"
 PROJECT_DIR="${2:?使用方法: phase-gate.sh <gate> <project_dir>}"
 AAD_DIR="${PROJECT_DIR}/.claude/aad"
@@ -27,6 +31,8 @@ do_post_init() {
   if command -v jq >/dev/null 2>&1; then
     jq -e '.runId' "${AAD_DIR}/state.json" >/dev/null 2>&1 \
       || gate_fail "state.json に runId がありません"
+    jq -e '.schemaVersion' "${AAD_DIR}/state.json" >/dev/null 2>&1 \
+      || gate_fail "state.json に schemaVersion がありません"
     jq -e '.projectDir' "${AAD_DIR}/project-config.json" >/dev/null 2>&1 \
       || gate_fail "project-config.json に projectDir がありません"
   else
@@ -37,6 +43,8 @@ c = json.load(open(sys.argv[2]))
 missing = []
 if 'runId' not in s:
     missing.append('state.json:runId')
+if 'schemaVersion' not in s:
+    missing.append('state.json:schemaVersion')
 if 'projectDir' not in c:
     missing.append('project-config.json:projectDir')
 if missing:
@@ -93,6 +101,7 @@ do_post_execute() {
     || gate_fail "state.json が存在しません: ${AAD_DIR}/state.json"
 
   local failed_count
+  # skipped は意図的にゲートチェック対象外（依存失敗によるスキップは復旧フローで処理）
   if command -v jq >/dev/null 2>&1; then
     failed_count=$(jq '[.tasks // {} | to_entries[] | select(.value.status == "failed")] | length' \
       "${AAD_DIR}/state.json" 2>/dev/null || echo "0")
@@ -130,8 +139,7 @@ print(d.get('critical', 0))" 2>/dev/null || echo "0")
   fi
 
   if [[ "$critical" -gt 0 ]]; then
-    echo "⚠ WARN: critical issues ${critical} 件 — 要確認" >&2
-    # exit 0 (警告のみ、ブロックしない)
+    gate_fail "critical issues ${critical} 件 — 修正が必要です"
   fi
 
   gate_pass "post-review"

@@ -49,21 +49,20 @@ FULL_FILES=$(git -C "$PROJECT_DIR" diff --name-only "${INITIAL_REF}..HEAD" 2>/de
 COMMITS=$(git -C "$PROJECT_DIR" log --oneline "${INITIAL_REF}..HEAD" 2>/dev/null || echo "")
 ```
 
-### Step 3: review-process.md を読む
+### Step 3: review-process.md を読み込む
 
 ```bash
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null)/aad-v2}"
 REVIEW_GUIDE="${PLUGIN_ROOT}/skills/aad/references/review-process.md"
+REVIEW_PROCESS=$(cat "$REVIEW_GUIDE" 2>/dev/null || echo "")
 ```
-
-`$REVIEW_GUIDE` ファイルを読む。
 
 ### Step 4: aad-reviewer (Coordinator モード) を起動
 
 ```
 Task(
   name: "final-review",
-  subagent_type: "general-purpose",
+  subagent_type: "aad-reviewer",
   prompt: """
   You are aad-reviewer in Coordinator mode.
   実装全体（全Wave）の最終コードレビューを実施してください。
@@ -80,7 +79,7 @@ Task(
   Project: {PROJECT_DIR}
   SCRIPTS_DIR: {SCRIPTS_DIR}
 
-  {review-process.md の内容を貼り付け}
+  ${REVIEW_PROCESS}
   """
 )
 ```
@@ -89,24 +88,55 @@ Task(
 
 ### Step 5: review-output.json 書き出し
 
-レビュー結果から critical/warning/info/autoFixed 数を集計:
+レビュー結果から構造化サマリーJSONブロックを抽出:
+
+```bash
+# レビュー結果テキストから JSON ブロックを抽出
+REVIEW_RESULT="<aad-reviewer の返答テキスト>"
+
+if command -v python3 >/dev/null 2>&1; then
+  REVIEW_COUNTS=$(echo "$REVIEW_RESULT" | python3 -c "
+import sys, json, re
+text = sys.stdin.read()
+# \`\`\`json ... \`\`\` ブロックから最後のJSONを抽出
+matches = re.findall(r'\`\`\`json\s*\n({.*?})\s*\n\`\`\`', text, re.DOTALL)
+if matches:
+    d = json.loads(matches[-1])
+    print(json.dumps({
+        'critical': d.get('critical', 0),
+        'warning': d.get('warning', 0),
+        'info': d.get('info', 0),
+        'autoFixed': d.get('autoFixed', 0)
+    }))
+else:
+    print(json.dumps({'critical': 0, 'warning': 0, 'info': 0, 'autoFixed': 0}))
+" 2>/dev/null)
+else
+  # フォールバック: Critical: N パターンをgrep
+  CRITICAL=$(echo "$REVIEW_RESULT" | grep -oE 'Critical: [0-9]+' | grep -oE '[0-9]+' | tail -1 || echo "0")
+  WARNING=$(echo "$REVIEW_RESULT" | grep -oE 'Warning: [0-9]+' | grep -oE '[0-9]+' | tail -1 || echo "0")
+  INFO=$(echo "$REVIEW_RESULT" | grep -oE 'Info: [0-9]+' | grep -oE '[0-9]+' | tail -1 || echo "0")
+  REVIEW_COUNTS="{\"critical\":${CRITICAL:-0},\"warning\":${WARNING:-0},\"info\":${INFO:-0},\"autoFixed\":0}"
+fi
+```
+
+抽出した値で review-output.json を書く:
 
 ```bash
 mkdir -p "${PROJECT_DIR}/.claude/aad/phases"
+echo "$REVIEW_COUNTS" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+d['status'] = 'completed'
+json.dump(d, open('${PROJECT_DIR}/.claude/aad/phases/review-output.json', 'w'), indent=2)
+" 2>/dev/null
 ```
+
+抽出に失敗した場合はフォールバック:
 
 ```json
-{
-  "status": "completed",
-  "critical": 0,
-  "warning": 0,
-  "info": 0,
-  "autoFixed": 0
-}
+{"status": "completed", "critical": 0, "warning": 0, "info": 0, "autoFixed": 0}
 ```
-
-レビューエージェントの出力からこれらの数値を読み取り、JSON を書く。
-Critical/Warning の数値が不明な場合は 0 を使用。
 
 ### Step 6: 結果表示
 
@@ -119,4 +149,5 @@ Critical: {critical} | Warning: {warning} | Info: {info} | 自動修正: {autoFi
 
 - INITIAL_REF が空の場合は execute-output.json から取得
 - review-output.json は必ず書く（レビュー失敗時も status: "failed" で書く）
-- critical > 0 の場合も exit 0（警告のみ、ブロックしない）
+- 構造化サマリー JSON が抽出できない場合は全カウントを 0 とする
+- review-output.json の critical/warning/info は reviewer の構造化サマリーから取得

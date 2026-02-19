@@ -72,6 +72,8 @@ Agent Teams 機能を有効化するために `.claude/settings.local.json` に�
 - `tdd.sh` — TDDパイプライン（spinlock merge）
 - `plan.sh` — 計画検証
 - `cleanup.sh` — リソースクリーンアップ
+- `retry.sh` — 汎用リトライラッパー（指数バックオフ対応）
+- `phase-gate.sh` — フェーズ間バリデーション
 
 ## 状態管理（3層ハイブリッド）
 

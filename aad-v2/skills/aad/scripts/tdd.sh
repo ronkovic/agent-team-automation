@@ -129,9 +129,32 @@ cmd_commit_phase() {
       ;;
   esac
 
+  # AAD_STRICT_TDD: GREEN コミット時に直前の RED コミットの存在を確認
+  if [[ "${AAD_STRICT_TDD:-false}" == "true" ]] && [[ "$phase" == "green" ]]; then
+    local last_commit_msg
+    last_commit_msg=$(git log -1 --format="%s" 2>/dev/null || echo "")
+    if ! echo "$last_commit_msg" | grep -q "^test("; then
+      echo "エラー: AAD_STRICT_TDD=true: GREEN コミットの前に RED (test) コミットが必要です" >&2
+      echo "  最後のコミット: $last_commit_msg" >&2
+      exit 1
+    fi
+  fi
+
+  # AAD_STRICT_TDD: REFACTOR コミット時にテストが通ることを確認
+  if [[ "${AAD_STRICT_TDD:-false}" == "true" ]] && [[ "$phase" == "refactor" || "$phase" == "review" ]]; then
+    local framework
+    framework=$(cmd_detect_framework "$(pwd)")
+    if [[ "$framework" != "unknown" ]]; then
+      echo "AAD_STRICT_TDD: REFACTOR前のテスト実行中..." >&2
+      if ! cmd_run_tests "$(pwd)" >/dev/null 2>&1; then
+        echo "エラー: AAD_STRICT_TDD=true: REFACTOR コミットの前にテストが通る必要があります" >&2
+        exit 1
+      fi
+    fi
+  fi
+
   # .claude/ディレクトリを除いてgit add
-  git add -A
-  git ls-files .claude/ | while IFS= read -r f; do git rm --cached "$f" 2>/dev/null; done || true
+  git add -A -- ':!.claude/'
 
   # コミット
   local commit_message="${prefix}(${scope}): ${description}"
@@ -175,14 +198,17 @@ cmd_merge_to_parent() {
   echo "✓ マージロックを取得しました"
 
   # ロック解放用trapを設定
-  trap 'rm -f "$lock_file"' EXIT
+  trap 'git -C "$project_dir" merge --abort 2>/dev/null || true; rm -f "$lock_file"' EXIT
 
   # マージ実行
   cd "$project_dir"
   git checkout "$parent_branch"
 
-  if git merge --no-ff "feature/${agent_name}" -m "merge(wave): merge ${agent_name}"; then
-    echo "✓ マージが成功しました: feature/${agent_name} → ${parent_branch}"
+  # feature/ 二重プレフィックス防止（worktree.sh cmd_create_task と同じガード）
+  case "$agent_name" in feature/*) ;; *) agent_name="feature/${agent_name}" ;; esac
+
+  if git merge --no-ff "${agent_name}" -m "merge(wave): merge ${agent_name}"; then
+    echo "✓ マージが成功しました: ${agent_name} → ${parent_branch}"
     rm -f "$lock_file"
     trap - EXIT
   else
@@ -210,7 +236,7 @@ cmd_merge_to_parent() {
 
     # H1修正: ロックファイルのみのコンフリクトを解決した場合、マージコミットを実行
     git commit --no-edit -m "merge(wave): merge ${agent_name} (auto-resolved lock conflict)"
-    echo "✓ マージが完了しました (ロックファイルのコンフリクトを自動解決): feature/${agent_name} → ${parent_branch}"
+    echo "✓ マージが完了しました (ロックファイルのコンフリクトを自動解決): ${agent_name} → ${parent_branch}"
     rm -f "$lock_file"
     trap - EXIT
   fi

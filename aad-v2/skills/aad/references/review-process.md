@@ -86,6 +86,17 @@ for round in 1..3:
 - ラウンド数: X/3 | 修正ファイル: X | 残存Critical: X
 ```
 
+### 構造化サマリー
+
+以下のJSONブロックを**必ずレポート末尾に含めること**（phase-review が自動パースする）:
+
+```json
+{"critical": X, "warning": X, "info": X, "autoFixed": X}
+```
+
+- critical/warning/info: 最終集約後のカウント
+- autoFixed: 自動修正ループで修正が成功した件数
+
 ## 完了後
 
 `TeamDelete()` でレビューチームを削除。

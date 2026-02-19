@@ -43,6 +43,14 @@ INVESTIGATION_DIR="${PROJECT_DIR}/.claude/aad/investigation"
 mkdir -p "$INVESTIGATION_DIR"
 ```
 
+調査ガイドを読み込み、エージェント別にセクションを抽出:
+
+```bash
+GUIDE_STRUCTURE=$(sed -n '/^## investigator-structure の指示/,/^---$/p' "${CLAUDE_PLUGIN_ROOT}/skills/aad/references/investigation-guide.md" 2>/dev/null || echo "")
+GUIDE_TESTS=$(sed -n '/^## investigator-tests の指示/,/^---$/p' "${CLAUDE_PLUGIN_ROOT}/skills/aad/references/investigation-guide.md" 2>/dev/null || echo "")
+GUIDE_INTERFACES=$(sed -n '/^## investigator-interfaces の指示/,/^## [^i]/p' "${CLAUDE_PLUGIN_ROOT}/skills/aad/references/investigation-guide.md" 2>/dev/null | sed '$d' || echo "")
+```
+
 3 つの調査エージェントを **1 メッセージで同時起動**（並列実行）:
 
 ```
@@ -51,7 +59,7 @@ Task(name: "investigator-structure", subagent_type: "general-purpose",
   PROJECT_DIR: {PROJECT_DIR}
   OUTPUT_FILE: {INVESTIGATION_DIR}/structure.md
 
-  {investigator-structure の指示セクション（investigation-guide.md から抜粋）}
+  ${GUIDE_STRUCTURE}
   """)
 
 Task(name: "investigator-tests", subagent_type: "general-purpose",
@@ -59,7 +67,7 @@ Task(name: "investigator-tests", subagent_type: "general-purpose",
   PROJECT_DIR: {PROJECT_DIR}
   OUTPUT_FILE: {INVESTIGATION_DIR}/tests.md
 
-  {investigator-tests の指示セクション（investigation-guide.md から抜粋）}
+  ${GUIDE_TESTS}
   """)
 
 Task(name: "investigator-interfaces", subagent_type: "general-purpose",
@@ -67,7 +75,7 @@ Task(name: "investigator-interfaces", subagent_type: "general-purpose",
   PROJECT_DIR: {PROJECT_DIR}
   OUTPUT_FILE: {INVESTIGATION_DIR}/interfaces.md
 
-  {investigator-interfaces の指示セクション（investigation-guide.md から抜粋）}
+  ${GUIDE_INTERFACES}
   """)
 ```
 

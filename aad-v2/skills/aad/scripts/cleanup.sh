@@ -63,7 +63,8 @@ cmd_orphans() {
   project_dir=$(cd "$project_dir" && pwd)
   cd "$project_dir"
 
-  local deleted_count=0
+  local orphan_count=0
+  local branch_count=0
 
   # 登録済みworktreeを列挙し、存在しないディレクトリを検出
   echo "孤児worktreeを検出中..."
@@ -78,7 +79,7 @@ cmd_orphans() {
     if [[ -n "$current_path" ]] && [[ "$line" == "" || "$line" =~ ^$ ]]; then
       if [[ ! -d "$current_path" ]] && [[ "$current_path" != "$project_dir" ]]; then
         echo "  孤児検出: $current_path"
-        deleted_count=$((deleted_count + 1))
+        orphan_count=$((orphan_count + 1))
       fi
       current_path=""
     fi
@@ -86,28 +87,42 @@ cmd_orphans() {
   # 最後の行にも対応
   if [[ -n "$current_path" ]] && [[ ! -d "$current_path" ]] && [[ "$current_path" != "$project_dir" ]]; then
     echo "  孤児検出: $current_path"
-    deleted_count=$((deleted_count + 1))
+    orphan_count=$((orphan_count + 1))
   fi
 
   # git worktree pruneを実行
-  git worktree prune
+  git worktree prune --verbose
   echo "✓ git worktree prune を実行しました"
 
   # feature/*ブランチのうちマージ済みのものを削除
   echo "マージ済みfeatureブランチを検出中..."
   local merged_branches
-  merged_branches=$(git branch --merged | grep 'feature/' | sed 's/^[* ]*//' || true)
+  local feature_pattern="feature/"
+  local config_file="${project_dir}/.claude/aad/project-config.json"
+  if [[ -f "$config_file" ]]; then
+    local fn=""
+    if command -v jq >/dev/null 2>&1; then
+      fn=$(jq -r '.featureName // empty' "$config_file" 2>/dev/null || echo "")
+    elif command -v python3 >/dev/null 2>&1; then
+      fn=$(python3 -c "import json; print(json.load(open('$config_file')).get('featureName',''))" 2>/dev/null || echo "")
+    fi
+    if [[ -n "$fn" ]]; then
+      feature_pattern="feature/.*${fn}"
+      echo "  スコープ: ${fn} に関連するブランチのみ対象"
+    fi
+  fi
+  merged_branches=$(git branch --merged | grep -E "$feature_pattern" | sed 's/^[* ]*//' || true)
   if [[ -n "$merged_branches" ]]; then
     while IFS= read -r branch; do
       git branch -d "$branch" 2>/dev/null || true
       echo "  ✓ マージ済みブランチを削除しました: $branch"
-      deleted_count=$((deleted_count + 1))
+      branch_count=$((branch_count + 1))
     done <<< "$merged_branches"
   else
     echo "  マージ済みのfeature/*ブランチはありません"
   fi
 
-  echo "✓ 孤児クリーンアップ完了 (削除リソース: ${deleted_count}件)"
+  echo "✓ 孤児クリーンアップ完了 (孤立worktree: ${orphan_count}件 pruned, ブランチ: ${branch_count}件 削除)"
 }
 
 # メインエントリポイント

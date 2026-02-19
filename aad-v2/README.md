@@ -38,6 +38,8 @@ aad-v2/
       tdd.sh                      # TDDパイプライン（spinlock merge）
       plan.sh                     # 計画検証
       cleanup.sh                  # リソースクリーンアップ
+      retry.sh                    # 汎用リトライラッパー（指数バックオフ対応）
+      phase-gate.sh               # フェーズ間バリデーション
   commands/
     aad.md                        # メインオーケストレーター
   agents/
@@ -45,6 +47,25 @@ aad-v2/
     aad-planner.md                # Wave計画生成（調査機能付き）
     aad-reviewer.md               # 並列コードレビュー（<100行）
     aad-merge-resolver.md         # マージ競合解決（~65行）
+```
+
+## Phase 遷移フロー
+
+```mermaid
+flowchart TD
+    A["/aad input"] --> B["Phase 1: Init"]
+    B -->|post-init gate| C["Phase 2: Plan"]
+    C -->|post-plan gate| D{"--dry-run?"}
+    D -->|yes| E["計画表示して終了"]
+    D -->|no| F["ユーザー承認"]
+    F --> G["Phase 3: Execute"]
+    G --> H["Wave 0: Bootstrap"]
+    H --> I["Wave 1+: 並列TDD"]
+    I -->|post-execute gate| J{"--skip-review?"}
+    J -->|yes| K["Phase 5: PR"]
+    J -->|no| L["Phase 4: Review"]
+    L -->|post-review gate| K
+    K --> M["Phase 6: Cleanup"]
 ```
 
 ## インストール
@@ -56,6 +77,9 @@ cp -r aad-v2/ ~/.claude/plugins/
 # Agent Teams 機能を有効化（必須）
 cp aad-v2/settings.local.json ~/.claude/settings.local.json
 # 既存の settings.local.json がある場合は env セクションのみ追記してください
+# 既存の settings.local.json とマージする場合
+jq -s '.[0] * .[1]' ~/.claude/settings.local.json aad-v2/settings.local.json > /tmp/merged.json \
+  && mv /tmp/merged.json ~/.claude/settings.local.json
 
 # スクリプトを直接使う場合（プロジェクトに配置）
 cp -r aad-v2/skills/aad/scripts/* path/to/project/scripts/
@@ -103,6 +127,84 @@ cat ~/.claude/plugins/aad-v2/hooks/README.md
 /aad requirements.md --keep-worktrees # worktreeを保持
 ```
 
+## 実行例
+
+### 正常実行
+
+```
+$ /aad requirements.md
+
+## Phase 1: 初期化完了
+PROJECT_DIR: /Users/dev/my-app
+PARENT_BRANCH: aad/develop
+worktreeベース: /Users/dev/my-app-requirements-wt/
+GATE PASS: post-init
+
+## Phase 2: 計画生成完了
+Wave数: 3 | エージェント数: 5
+GATE PASS: post-plan
+
+## Phase 3: Wave実行
+### Wave 0: Bootstrap (逐次実行)
+  ✓ コアモデル・共有型ファイル生成完了 (3コミット)
+
+### Wave 1: 並列実行 (3エージェント)
+  ✓ agent-order: TDD完了 → マージ成功
+  ✓ agent-user: TDD完了 → マージ成功
+  ✓ agent-notification: TDD完了 → マージ成功
+
+### Wave 2: 並列実行 (2エージェント)
+  ✓ agent-api: TDD完了 → マージ成功
+  ✓ agent-cli: TDD完了 → マージ成功
+
+GATE PASS: post-execute
+
+## Phase 4: 最終コードレビュー完了
+Critical: 0 | Warning: 2 | Info: 5 | 自動修正: 1件
+GATE PASS: post-review
+
+## Phase 5: PR作成
+PR #42: https://github.com/user/my-app/pull/42
+
+## Phase 6: クリーンアップ完了
+✓ worktree削除・state.jsonアーカイブ
+```
+
+### ドライラン（計画のみ）
+
+```
+$ /aad requirements.md --dry-run
+
+## Phase 1: 初期化完了
+## Phase 2: 計画生成完了
+Wave数: 3 | エージェント数: 5
+
+DRY_RUN=true: 計画のみ生成しました。実行はされません。
+計画ファイル: .claude/aad/plan.json
+```
+
+### エラー時
+
+```
+$ /aad requirements.md
+
+## Phase 3: Wave実行
+### Wave 1: 並列実行 (3エージェント)
+  ✓ agent-order: TDD完了 → マージ成功
+  ✗ agent-user: テスト失敗 → リトライ中...
+  ✗ agent-user: リトライ後も失敗 → スキップして継続
+  ✓ agent-notification: TDD完了 → マージ成功
+
+⚠ Wave 1: 失敗タスク 1件 (agent-user)
+⚠ Wave 2: agent-api を依存失敗のためスキップ
+
+GATE FAIL: 失敗タスクが 1 件あります
+
+## Phase 4: 最終コードレビュー完了
+Critical: 1 | Warning: 3 | Info: 2 | 自動修正: 0件
+⚠ post-review ゲート失敗: critical issues が検出されました。--skip-review で回避可能です。
+```
+
 ## 環境変数
 
 | 変数 | 説明 |
@@ -124,17 +226,22 @@ cat ~/.claude/plugins/aad-v2/hooks/README.md
 
 ```json
 {
+  "schemaVersion": 1,
   "runId": "20260218-143022",
   "currentLevel": 2,
   "completedLevels": [0, 1],
   "tasks": {
     "wave0-core": { "level": 0, "status": "completed", "completedAt": "..." },
     "agent-order": { "level": 1, "status": "completed", "mergedAt": "..." },
-    "agent-portfolio": { "level": 1, "status": "failed", "error": "test failures" }
+    "agent-portfolio": { "level": 1, "status": "failed", "reason": "test failures" }
   },
-  "mergeLog": [...]
+  "mergeLog": [
+    { "agent": "agent-order", "mergedAt": "...", "branch": "feature/agent-order" }
+  ]
 }
 ```
+
+詳細なスキーマ定義は [`specs/state.schema.md`](specs/state.schema.md) を参照。
 
 ## Codebase Investigation（既存プロジェクト向け）
 
@@ -173,3 +280,79 @@ requirements.md にテーブル形式で定義（JSON スキーマ不要）:
 ```
 
 Wave 0 でこの定義から共有型ファイル（`src/types/api.ts` 等）を生成する。
+
+## トラブルシューティング
+
+### よくあるエラーと対処法
+
+#### 1. `GATE FAIL: state.json に schemaVersion がありません`
+
+**原因**: v0 形式の state.json（旧バージョン）が残っている。
+
+**対処**: 新規 run を開始するか、state.json を手動修正:
+```bash
+# state.json に schemaVersion を追加
+jq '. + {"schemaVersion": 1}' .claude/aad/state.json > /tmp/state.tmp \
+  && mv /tmp/state.tmp .claude/aad/state.json
+```
+
+#### 2. `GATE FAIL: マージロックが残存しています`
+
+**原因**: 前回の実行が途中で中断され、`aad-merge.lock` が残った。
+
+**対処**:
+```bash
+rm .claude/aad/aad-merge.lock
+```
+
+#### 3. `GATE FAIL: 失敗タスクが N 件あります`
+
+**原因**: Wave 実行中にエージェントがテスト失敗した。
+
+**対処**: 部分再実行（復旧フロー）:
+```bash
+# 失敗タスクを確認
+jq '.tasks | to_entries[] | select(.value.status == "failed")' .claude/aad/state.json
+
+# 失敗タスクのみ再実行（状態をリセット）
+jq '.tasks["agent-xxx"].status = "pending"' .claude/aad/state.json \
+  > /tmp/state.tmp && mv /tmp/state.tmp .claude/aad/state.json
+
+# /aad を再実行（完了済みレベルはスキップされる）
+/aad requirements.md
+```
+
+#### 4. `deps.sh が見つかりません` 警告
+
+**原因**: `CLAUDE_PLUGIN_ROOT` が未設定、またはプラグインが正しくインストールされていない。
+
+**対処**:
+```bash
+# 環境変数を明示指定
+export AAD_SCRIPTS_DIR="$HOME/.claude/plugins/aad-v2/skills/aad/scripts"
+/aad requirements.md
+```
+
+#### 5. worktree 操作エラー (`already exists`)
+
+**原因**: 前回の worktree が削除されずに残っている。
+
+**対処**:
+```bash
+# 孤立 worktree の削除
+git worktree prune
+ls ../myproject-requirements-wt/ && rm -rf ../myproject-requirements-wt/
+```
+
+### 復旧フロー（部分再実行）
+
+```bash
+# 1. 現在の状態を確認
+cat .claude/aad/state.json | jq '{currentLevel, completedLevels, failed: [.tasks | to_entries[] | select(.value.status == "failed") | .key]}'
+
+# 2. 完了済みレベルを保持したまま失敗タスクをリセット
+# （/aad コマンドが自動的に completedLevels をスキップする）
+
+# 3. 再実行
+/aad requirements.md
+```

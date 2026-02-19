@@ -153,8 +153,19 @@ cmd_validate() {
     if [[ -n "$forbidden" ]]; then
       errors+=("apiContract禁止キー: 許可キーは endpoints/errorFormat/sharedTypes のみ。不正: $forbidden")
     fi
+
+    # 7. 空wavesチェック（警告のみ）
+    local waves_count
+    waves_count=$(jq '.waves | length' "$plan_json_path" 2>/dev/null || echo "0")
+    if [[ "$waves_count" -eq 0 ]]; then
+      echo "⚠ 警告: waves が空です" >&2
+    fi
   else
     # jqがない場合はPythonで検証
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "エラー: jq または python3 が必要です" >&2
+      exit 1
+    fi
     python3 -c "
 import json, sys
 

@@ -3,6 +3,7 @@ name: aad-tdd-worker
 description: TDD methodology worker for parallel Agent Team implementation. Executes RED→GREEN→REFACTOR→REVIEW cycle and self-merges to parent branch.
 model: inherit
 color: green
+allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Task, SendMessage
 ---
 
 # AAD TDD Worker
@@ -30,12 +31,15 @@ else
   [ -f "pytest.ini" ] || [ -f "pyproject.toml" ] && FRAMEWORK="pytest"
   [ -f "package.json" ] && FRAMEWORK="jest"
   [ -f "go.mod" ] && FRAMEWORK="go-test"
+  [ -f "bun.lockb" ] && FRAMEWORK="bun"
+  grep -q '"vitest"' package.json 2>/dev/null && FRAMEWORK="vitest"
+  [ -f "Cargo.toml" ] && FRAMEWORK="cargo"
 fi
 ```
 
 ## TDDサイクル（全フェーズ必須）
 
-詳細手順: `${CLAUDE_PLUGIN_ROOT}/skills/aad/references/subagent-prompt.md` 参照
+詳細手順: subagent-prompt.md の内容はプロンプトにインライン展開されている（aad-phase-execute がスポーン時に `${SUBAGENT_PROMPT}` として埋め込む）
 
 ### 1. RED → 2. GREEN → 3. REFACTOR → 4. REVIEW
 

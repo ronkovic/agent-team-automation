@@ -22,7 +22,8 @@ color: yellow
 4. 全完了を待つ → ファクトチェック → 重複排除
 5. `TeamDelete()`
 6. 自動修正ループ（Critical/Warning → 最大3ラウンド）
-7. 最終レポートを返す
+7. 最終レポートに構造化サマリー (JSON) を含める
+8. 最終レポートを返す
 
 ## Single-Category モード（`REVIEW_CATEGORY` 指定時）
 
@@ -53,6 +54,11 @@ color: yellow
 
 ### 総評
 - Critical: X件 | Warning: Y件 | Info: Z件
+
+### 構造化サマリー
+```json
+{"critical": X, "warning": X, "info": X}
+```
 ```
 
 ## 重要ルール

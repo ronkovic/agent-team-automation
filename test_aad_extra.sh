@@ -2,8 +2,9 @@
 # aad-v2 追加テスト — hooks + エッジケース
 set -euo pipefail
 
-SCRIPTS_DIR="/Users/kazuki/workspace/sandbox/agent-team-automation/aad-v2/skills/aad/scripts"
-HOOKS_DIR="/Users/kazuki/workspace/sandbox/agent-team-automation/aad-v2/hooks"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_DIR="${REPO_ROOT}/aad-v2/skills/aad/scripts"
+HOOKS_DIR="${REPO_ROOT}/aad-v2/hooks"
 TEST_DIR="/tmp/aad-extra-test-$$"
 PASS=0
 FAIL=0
@@ -234,7 +235,7 @@ EOF
     fail "8-4" "exit 0 が返った (禁止キーを検出すべき)"
   fi
 
-  # 8-5: validate 空のwaves → 正常
+  # 8-5: validate 空のwaves → 正常 + 警告
   local empty_waves="${TEST_DIR}/empty_waves.json"
   cat > "$empty_waves" <<'EOF'
 {
@@ -242,9 +243,20 @@ EOF
   "waves": []
 }
 EOF
-  bash "${SCRIPTS_DIR}/plan.sh" validate "$empty_waves" 2>&1 | grep -q "validation passed" \
-    && pass "8-5: validate 空waves → passed" \
-    || fail "8-5" "validation passedが出力されない"
+  local empty_stdout empty_stderr
+  empty_stdout=$(bash "${SCRIPTS_DIR}/plan.sh" validate "$empty_waves" 2>"${TEST_DIR}/empty_waves_stderr")
+  empty_stderr=$(cat "${TEST_DIR}/empty_waves_stderr")
+  if echo "$empty_stdout" | grep -q "validation passed"; then
+    pass "8-5: validate 空waves → validation passed"
+  else
+    fail "8-5" "validation passedが出力されない"
+  fi
+  if echo "$empty_stderr" | grep -qE "⚠|警告"; then
+    pass "8-5b: validate 空waves → 警告出力確認"
+  else
+    fail "8-5b" "空wavesで警告が出力されない: stderr=$empty_stderr"
+  fi
+  rm -f "${TEST_DIR}/empty_waves_stderr"
 
   # 8-6: init → language = javascript/typescript
   cat > "${TEST_DIR}/package.json" <<'EOF'
@@ -313,6 +325,53 @@ EOF
     fail "9-6" "exit 0 が返った (strictモードでエラーすべき)"
   fi
   rm -rf "$empty_dir"
+
+  # 9-8: AAD_STRICT_TDD=true + RED なしで GREEN → exit 1
+  local strict_dir="${TEST_DIR}/strict_tdd_test"
+  mkdir -p "$strict_dir"
+  cd "$strict_dir"
+  git init -q
+  git config user.email "test@example.com"
+  git config user.name "Test"
+  echo "# strict tdd" > README.md
+  git add -A && git commit -q -m "chore: init"
+  # REDコミットなしで直接GREENコミットを試みる (最後のコミットはchore:init)
+  echo "def add(a,b): return a+b" > src_file.py
+  git add -A
+  local strict_exit=0
+  AAD_STRICT_TDD=true bash "${SCRIPTS_DIR}/tdd.sh" commit-phase green "calc" "add function" >/dev/null 2>&1 || strict_exit=$?
+  cd "$TEST_DIR"
+  rm -rf "$strict_dir"
+  if [[ "$strict_exit" -ne 0 ]]; then
+    pass "9-8: AAD_STRICT_TDD=true + RED なしで GREEN → exit 1"
+  else
+    fail "9-8" "exit 0 が返った (exit 1 を期待)"
+  fi
+
+  # 9-9: AAD_STRICT_TDD=true + RED → GREEN の正常フロー → exit 0
+  local strict_dir2="${TEST_DIR}/strict_tdd_test2"
+  mkdir -p "$strict_dir2"
+  cd "$strict_dir2"
+  git init -q
+  git config user.email "test@example.com"
+  git config user.name "Test"
+  echo "# strict tdd 2" > README.md
+  git add -A && git commit -q -m "chore: init"
+  # まずREDコミット
+  echo "def test_add(): assert False" > test_file.py
+  git add -A && git commit -q -m "test(calc): add failing test"
+  # 次にGREENコミット (直前がtest(で始まるコミット)
+  echo "def add(a,b): return a+b" > src_file.py
+  git add -A
+  local strict_exit2=0
+  AAD_STRICT_TDD=true bash "${SCRIPTS_DIR}/tdd.sh" commit-phase green "calc" "implement add" >/dev/null 2>&1 || strict_exit2=$?
+  cd "$TEST_DIR"
+  rm -rf "$strict_dir2"
+  if [[ "$strict_exit2" -eq 0 ]]; then
+    pass "9-9: AAD_STRICT_TDD=true + RED → GREEN 正常フロー → exit 0"
+  else
+    fail "9-9" "exit ${strict_exit2} が返った (0 を期待)"
+  fi
 
   # 9-7: stale lock 検出 (存在しないPIDのlock → 自動削除してマージ成功)
   local parent_b="aad/develop"
@@ -398,6 +457,25 @@ test_worktree_edge() {
   rm -rf "${TEST_DIR}/node_modules"
   bash "${SCRIPTS_DIR}/worktree.sh" remove "${WT_BASE}/sym-worker" "sym-worker" >/dev/null 2>&1 || true
 
+  # 10-6: resolve-gitdir 存在しないパス → exit 1
+  if ! bash "${SCRIPTS_DIR}/worktree.sh" resolve-gitdir "/tmp/nonexistent-path-$$" >/dev/null 2>&1; then
+    pass "10-6: resolve-gitdir 存在しないパス → exit 1"
+  else
+    fail "10-6" "exit 0 が返った (存在しないパスでexit 1を期待)"
+  fi
+
+  # 10-7: resolve-gitdir 有効なworktreeパス → 正常終了
+  bash "${SCRIPTS_DIR}/worktree.sh" create-task "$WT_BASE" "resolve-worker" "resolve-worker" "$parent_b" >/dev/null 2>&1
+  local resolve_out
+  resolve_out=$(bash "${SCRIPTS_DIR}/worktree.sh" resolve-gitdir "${WT_BASE}/resolve-worker" 2>&1)
+  local resolve_exit=$?
+  if [[ "$resolve_exit" -eq 0 ]] && echo "$resolve_out" | grep -q "修復が完了"; then
+    pass "10-7: resolve-gitdir 有効なworktree → 修復完了メッセージ"
+  else
+    fail "10-7" "resolve-gitdir失敗: exit=${resolve_exit}, out=${resolve_out}"
+  fi
+  bash "${SCRIPTS_DIR}/worktree.sh" remove "${WT_BASE}/resolve-worker" "resolve-worker" >/dev/null 2>&1 || true
+
   # クリーンアップ
   rm -rf "$WT_BASE"
   git worktree prune >/dev/null 2>&1 || true
@@ -447,6 +525,40 @@ test_deps_edge() {
   else
     fail "11-3" "exit 0 が返った"
   fi
+
+  # 11-4: deps.sh Cargo.toml (Rust) - cargo 不在時は警告で続行
+  local rust_dep_dir="${TEST_DIR}/rust_dep_test"
+  mkdir -p "$rust_dep_dir"
+  cat > "${rust_dep_dir}/Cargo.toml" <<'RUSTEOF'
+[package]
+name = "test-crate"
+version = "0.1.0"
+edition = "2021"
+RUSTEOF
+  local rust_exit=0
+  bash "${SCRIPTS_DIR}/deps.sh" install "$rust_dep_dir" >/dev/null 2>&1 || rust_exit=$?
+  if [[ "$rust_exit" -eq 0 ]]; then
+    pass "11-4: deps Rust (Cargo.toml) → exit 0"
+  else
+    fail "11-4" "exit ${rust_exit} が返った (0 を期待)"
+  fi
+  rm -rf "$rust_dep_dir"
+
+  # 11-5: deps.sh Gemfile (Ruby) - bundle 不在時は警告で続行
+  local ruby_dep_dir="${TEST_DIR}/ruby_dep_test"
+  mkdir -p "$ruby_dep_dir"
+  cat > "${ruby_dep_dir}/Gemfile" <<'RUBYEOF'
+source "https://rubygems.org"
+gem "rake"
+RUBYEOF
+  local ruby_exit=0
+  bash "${SCRIPTS_DIR}/deps.sh" install "$ruby_dep_dir" >/dev/null 2>&1 || ruby_exit=$?
+  if [[ "$ruby_exit" -eq 0 ]]; then
+    pass "11-5: deps Ruby (Gemfile) → exit 0"
+  else
+    fail "11-5" "exit ${ruby_exit} が返った (0 を期待)"
+  fi
+  rm -rf "$ruby_dep_dir"
 }
 
 # ============================================================
@@ -497,6 +609,24 @@ json.dump({'worktreeDir': sys.argv[1], 'parentBranch': sys.argv[2]}, open(sys.ar
   echo "$orphan_out" | grep -q "prune" \
     && pass "12-3: orphans → prune 実行確認" \
     || fail "12-3" "prune が実行されない"
+
+  # 12-4: orphans は未マージ feature ブランチを保持することを確認
+  local parent_b12="aad/develop"
+  git -C "$TEST_DIR" rev-parse --verify "$parent_b12" >/dev/null 2>&1 \
+    || git -C "$TEST_DIR" branch "$parent_b12" HEAD 2>/dev/null
+  git -C "$TEST_DIR" checkout -q "$parent_b12"
+  git -C "$TEST_DIR" checkout -b "feature/unmerged-branch" >/dev/null 2>&1
+  echo "unmerged work" > "${TEST_DIR}/unmerged.txt"
+  git -C "$TEST_DIR" add -A && git -C "$TEST_DIR" commit -q -m "feat: unmerged work"
+  git -C "$TEST_DIR" checkout -q "$parent_b12"
+  # orphans 実行 (未マージなので削除されないはず)
+  bash "${SCRIPTS_DIR}/cleanup.sh" orphans "$TEST_DIR" >/dev/null 2>&1 || true
+  if git -C "$TEST_DIR" rev-parse --verify "feature/unmerged-branch" >/dev/null 2>&1; then
+    pass "12-4: orphans → 未マージ feature ブランチを保持"
+  else
+    fail "12-4" "未マージブランチが削除された"
+  fi
+  git -C "$TEST_DIR" branch -D "feature/unmerged-branch" >/dev/null 2>&1 || true
 }
 
 # ============================================================
@@ -552,7 +682,7 @@ EOF
     fail "13-4" "exit 0 が返った"
   fi
 
-  # 13-5: --backoff オプション + delay=0 → エラーなしで動作
+  # 13-5: --backoff オプション + delay=1 → 経過時間 ≥ 2秒を確認
   local counter_file2="${TEST_DIR}/backoff_counter"
   local backoff_cmd="${TEST_DIR}/backoff_cmd.sh"
   echo "0" > "$counter_file2"
@@ -561,16 +691,18 @@ EOF
 count=\$(cat "$counter_file2")
 count=\$((count+1))
 echo "\$count" > "$counter_file2"
-[ "\$count" -ge 2 ]
+[ "\$count" -ge 3 ]
 EOF
   chmod +x "$backoff_cmd"
-  bash "$RETRY_SH" --max 3 --delay 0 --backoff -- bash "$backoff_cmd" 2>/dev/null
+  local START_TIME=$SECONDS
+  bash "$RETRY_SH" --max 4 --delay 1 --backoff -- bash "$backoff_cmd" 2>/dev/null
+  local ELAPSED=$((SECONDS - START_TIME))
   local backoff_count
   backoff_count=$(cat "$counter_file2")
-  if [[ "$backoff_count" -ge 2 ]]; then
-    pass "13-5: --backoff + delay=0 → 2回目で成功"
+  if [[ "$backoff_count" -ge 3 ]] && [[ "$ELAPSED" -ge 2 ]]; then
+    pass "13-5: --backoff + delay=1 → 3回目で成功, 経過${ELAPSED}秒 (≥2秒)"
   else
-    fail "13-5" "backoffが正常に動作しない: count=${backoff_count}"
+    fail "13-5" "backoff不正: count=${backoff_count}, elapsed=${ELAPSED}秒"
   fi
   rm -f "$counter_file2" "$backoff_cmd"
 }
@@ -596,7 +728,7 @@ test_phase_gate() {
   local out
 
   # 14-1: post-init 正常系 → GATE PASS
-  echo '{"runId":"test-run","currentLevel":0,"completedLevels":[],"tasks":{},"mergeLog":[]}' \
+  echo '{"schemaVersion":1,"runId":"test-run","currentLevel":0,"completedLevels":[],"tasks":{},"mergeLog":[]}' \
     > "${aad_dir}/state.json"
   echo "{\"projectDir\":\"${gate_dir}\",\"worktreeDir\":\"/tmp/wt\",\"featureName\":\"test\",\"parentBranch\":\"aad/develop\"}" \
     > "${aad_dir}/project-config.json"
@@ -682,22 +814,88 @@ PLANEOF
     fail "14-8" "GATE PASSが出力されない: $out"
   fi
 
-  # 14-9: post-review critical > 0 → WARN + exit 0 (GATE PASS)
+  # 14-9: post-review critical > 0 → GATE FAIL (exit 1)
   echo '{"status":"completed","critical":2,"warning":1,"info":3,"autoFixed":0}' \
     > "${aad_dir}/phases/review-output.json"
-  out=$(bash "$GATE_SH" post-review "$gate_dir" 2>&1)
+  out=$(bash "$GATE_SH" post-review "$gate_dir" 2>&1 || true)
   local exit_code=0
   bash "$GATE_SH" post-review "$gate_dir" >/dev/null 2>&1 || exit_code=$?
-  if echo "$out" | grep -q "GATE PASS" && [[ "$exit_code" -eq 0 ]]; then
-    pass "14-9: post-review critical > 0 → WARN + GATE PASS (exit 0)"
-  elif echo "$out" | grep -q "GATE PASS"; then
-    pass "14-9: post-review critical > 0 → GATE PASS"
+  if echo "$out" | grep -q "GATE FAIL" && [[ "$exit_code" -ne 0 ]]; then
+    pass "14-9: post-review critical > 0 → GATE FAIL (exit 1)"
   else
-    fail "14-9" "GATE PASSが出力されない: $out"
+    fail "14-9" "GATE FAILが出力されない (exit_code=${exit_code}): $out"
+  fi
+
+  # 14-9b: post-review critical = 0, warning > 0 → GATE PASS
+  echo '{"status":"completed","critical":0,"warning":3,"info":2,"autoFixed":1}' \
+    > "${aad_dir}/phases/review-output.json"
+  out=$(bash "$GATE_SH" post-review "$gate_dir" 2>&1)
+  local exit_code_b=0
+  bash "$GATE_SH" post-review "$gate_dir" >/dev/null 2>&1 || exit_code_b=$?
+  if echo "$out" | grep -q "GATE PASS" && [[ "$exit_code_b" -eq 0 ]]; then
+    pass "14-9b: post-review critical=0, warning>0 → GATE PASS (exit 0)"
+  else
+    fail "14-9b" "GATE PASSが出力されない (exit_code=${exit_code_b}): $out"
   fi
 
   cd "$TEST_DIR"
   rm -rf "$gate_dir"
+}
+
+# ============================================================
+# Section 15: state.json スキーマバリデーション
+# ============================================================
+test_state_schema() {
+  header "Section 15: state.json スキーマバリデーション (schemaVersion)"
+
+  GATE_SH="${SCRIPTS_DIR}/phase-gate.sh"
+  local schema_dir="${TEST_DIR}/schema-test-$$"
+  mkdir -p "${schema_dir}/.claude/aad"
+  cd "$schema_dir"
+  git init -q
+  git config user.email "test@example.com"
+  git config user.name "Test"
+  echo "# test" > README.md
+  git add -A && git commit -q -m "init"
+
+  local aad_dir="${schema_dir}/.claude/aad"
+
+  # 15-1: schemaVersion あり → GATE PASS
+  echo '{
+    "schemaVersion": 1,
+    "runId": "20260101-000000",
+    "currentLevel": 0,
+    "completedLevels": [],
+    "tasks": {},
+    "mergeLog": [],
+    "updatedAt": "2026-01-01T00:00:00Z"
+  }' > "${aad_dir}/state.json"
+  echo '{"projectDir": "'"${schema_dir}"'"}' > "${aad_dir}/project-config.json"
+  out=$(bash "$GATE_SH" post-init "$schema_dir" 2>&1)
+  if echo "$out" | grep -q "GATE PASS"; then
+    pass "15-1: schemaVersion あり → GATE PASS"
+  else
+    fail "15-1" "GATE PASS が出力されない: $out"
+  fi
+
+  # 15-2: schemaVersion なし → GATE FAIL
+  echo '{
+    "runId": "20260101-000000",
+    "currentLevel": 0,
+    "completedLevels": [],
+    "tasks": {},
+    "mergeLog": [],
+    "updatedAt": "2026-01-01T00:00:00Z"
+  }' > "${aad_dir}/state.json"
+  out=$(bash "$GATE_SH" post-init "$schema_dir" 2>&1 || true)
+  if echo "$out" | grep -q "GATE FAIL"; then
+    pass "15-2: schemaVersion なし → GATE FAIL"
+  else
+    fail "15-2" "GATE FAIL が出力されない: $out"
+  fi
+
+  cd "$TEST_DIR"
+  rm -rf "$schema_dir"
 }
 
 # ============================================================
@@ -722,6 +920,7 @@ main() {
   test_cleanup_edge
   test_retry
   test_phase_gate
+  test_state_schema
 
   echo
   echo "=============================="

@@ -16,17 +16,17 @@ deps_install() {
   if [ -f "pyproject.toml" ] || [ -f "setup.py" ] || [ -f "requirements.txt" ]; then
     if command -v uv >/dev/null 2>&1; then
       uv venv .venv 2>/dev/null || true
-      local UV_INSTALL="uv pip install --python .venv/bin/python"
-      if [ -f "pyproject.toml" ] && grep -q '\[.*test\]' pyproject.toml 2>/dev/null; then
-        $UV_INSTALL -e ".[dev]" 2>/dev/null \
-          || $UV_INSTALL -e ".[test]" 2>/dev/null \
-          || $UV_INSTALL pytest
+      local UV_INSTALL=(uv pip install --python .venv/bin/python)
+      if [ -f "pyproject.toml" ]; then
+        "${UV_INSTALL[@]}" -e ".[dev]" 2>/dev/null \
+          || "${UV_INSTALL[@]}" -e ".[test]" 2>/dev/null \
+          || "${UV_INSTALL[@]}" pytest
       elif [ -f "requirements.txt" ]; then
-        $UV_INSTALL -r requirements.txt
+        "${UV_INSTALL[@]}" -r requirements.txt
       elif [ -f "setup.py" ]; then
-        $UV_INSTALL -e . 2>/dev/null || $UV_INSTALL pytest
+        "${UV_INSTALL[@]}" -e . 2>/dev/null || "${UV_INSTALL[@]}" pytest
       else
-        $UV_INSTALL pytest
+        "${UV_INSTALL[@]}" pytest
       fi
       python=".venv/bin/python"
     elif command -v python3 >/dev/null 2>&1; then

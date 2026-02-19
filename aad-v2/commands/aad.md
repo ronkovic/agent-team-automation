@@ -40,7 +40,9 @@ while [ $i -lt ${#ARGS[@]} ]; do
     *)
       arg="${ARGS[$i]}"
       if [ -z "$INPUT_SOURCE" ]; then
-        if { [[ "$arg" == /* ]] || [[ "$arg" == ./* ]] || [[ "$arg" == ../* ]] || [ -d "$arg" ]; } \
+        if [ -f "$arg" ]; then
+          INPUT_SOURCE="$arg"
+        elif { [[ "$arg" == /* ]] || [[ "$arg" == ./* ]] || [[ "$arg" == ../* ]] || [ -d "$arg" ]; } \
            && [ -z "$INPUT_SOURCE" ]; then
           PROJECT_DIR="$arg"
         else
@@ -125,6 +127,7 @@ RUN_ID=$(date +%Y%m%d-%H%M%S)
 mkdir -p "${PROJECT_DIR}/.claude/aad"
 cat > "${PROJECT_DIR}/.claude/aad/state.json" <<STATEEOF
 {
+  "schemaVersion": 1,
   "runId": "${RUN_ID}",
   "currentLevel": 0,
   "completedLevels": [],
@@ -248,6 +251,10 @@ else
   INITIAL_REF=$(python3 -c "import json; d=json.load(open('$EXECUTE_OUTPUT')); print(d.get('initialRef', ''))" 2>/dev/null || echo "")
   COMMIT_COUNT=$(python3 -c "import json; d=json.load(open('$EXECUTE_OUTPUT')); print(d.get('commitCount', '?'))" 2>/dev/null || echo "?")
 fi
+if [ -z "$INITIAL_REF" ]; then
+  INITIAL_REF=$(git -C "$PROJECT_DIR" rev-list --max-parents=0 HEAD 2>/dev/null | head -1)
+  echo "⚠ INITIAL_REF が取得できなかったため、最初のコミットを使用します" >&2
+fi
 ```
 
 表示: `## Phase 3: 実装実行完了 | コミット数: {COMMIT_COUNT}`
@@ -301,8 +308,9 @@ fi
 
 ```bash
 if [ -n "$SCRIPTS_DIR" ] && [ -f "${SCRIPTS_DIR}/phase-gate.sh" ]; then
-  bash "${SCRIPTS_DIR}/phase-gate.sh" post-review "$PROJECT_DIR" 2>/dev/null || true
-  # post-review は警告のみ (exit 0 維持)
+  if ! bash "${SCRIPTS_DIR}/phase-gate.sh" post-review "$PROJECT_DIR" 2>&1; then
+    echo "⚠ post-review ゲート失敗: critical issues が検出されました。--skip-review で回避可能です。"
+  fi
 fi
 ```
 
@@ -350,14 +358,88 @@ cp "${PROJECT_DIR}/.claude/aad/plan.json"  "${ARCHIVE_DIR}/" 2>/dev/null || true
 
 ## 復旧フロー（エラー時）
 
-state.json を読んで `status: "failed"` のタスクを特定:
+### Step R-1: 失敗タスクの特定
 
 ```bash
-jq '.tasks | to_entries[] | select(.value.status == "failed")' state.json
-git log --oneline ${INITIAL_REF}..HEAD | grep "merge(wave"
+STATE_FILE="${PROJECT_DIR}/.claude/aad/state.json"
+if command -v jq >/dev/null 2>&1; then
+  FAILED_TASKS=$(jq -r '.tasks | to_entries[]
+    | select(.value.status == "failed") | .key' "$STATE_FILE")
+  SKIPPED_TASKS=$(jq -r '.tasks | to_entries[]
+    | select(.value.status == "skipped") | .key' "$STATE_FILE")
+else
+  FAILED_TASKS=$(python3 -c "
+import json
+d = json.load(open('${STATE_FILE}'))
+for k,v in d.get('tasks',{}).items():
+    if v.get('status') == 'failed': print(k)
+")
+  SKIPPED_TASKS=$(python3 -c "
+import json
+d = json.load(open('${STATE_FILE}'))
+for k,v in d.get('tasks',{}).items():
+    if v.get('status') == 'skipped': print(k)
+")
+fi
+echo "失敗タスク: ${FAILED_TASKS:-なし}"
+echo "スキップタスク: ${SKIPPED_TASKS:-なし}"
 ```
 
-失敗タスクのみ worktree 再作成・エージェント再 spawn。成功済みレベルはスキップ。
+### Step R-2: 成功済みレベルのスキップ判定
+
+```bash
+if command -v jq >/dev/null 2>&1; then
+  COMPLETED_LEVELS=$(jq '.completedLevels // []' "$STATE_FILE")
+else
+  COMPLETED_LEVELS=$(python3 -c "
+import json
+d = json.load(open('${STATE_FILE}'))
+print(d.get('completedLevels', []))")
+fi
+echo "完了済みレベル（スキップ対象）: ${COMPLETED_LEVELS}"
+# 完了済みレベルのタスクは再実行不要
+```
+
+### Step R-3: 失敗タスクの worktree 再作成・再実行
+
+```bash
+for TASK in $FAILED_TASKS; do
+  echo "▶ タスク再実行: ${TASK}"
+  # 既存 worktree 削除（残存する場合）
+  if [ -n "$SCRIPTS_DIR" ]; then
+    bash "${SCRIPTS_DIR}/worktree.sh" remove "${WORKTREE_DIR}/${TASK}" 2>/dev/null || true
+  fi
+  # state.json のステータスをリセット
+  if command -v jq >/dev/null 2>&1; then
+    jq --arg t "$TASK" '.tasks[$t].status = "pending" | .tasks[$t].retried = true' \
+      "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+  else
+    python3 -c "
+import json
+d = json.load(open('${STATE_FILE}'))
+d['tasks']['${TASK}']['status'] = 'pending'
+d['tasks']['${TASK}']['retried'] = True
+with open('${STATE_FILE}', 'w') as f: json.dump(d, f, indent=2)
+"
+  fi
+  # エージェント再 spawn（aad-phase-execute 経由）
+  echo "  → ${TASK} を再スポーンします"
+done
+```
+
+### Step R-4: 依存タスクの再評価
+
+```bash
+# スキップされたタスクを依存失敗の解消後にリセット
+for TASK in $SKIPPED_TASKS; do
+  # 依存タスクが resolved かチェック
+  if command -v jq >/dev/null 2>&1; then
+    DEP_FAILED=$(jq --arg t "$TASK" \
+      '.tasks[$t].dependsOn // [] | map(. as $d | $d) | length' "$STATE_FILE" 2>/dev/null || echo "0")
+  fi
+  echo "  → ${TASK}: 依存関係再確認後にリセット"
+done
+```
 
 ## 出力フォーマット
 

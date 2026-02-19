@@ -55,15 +55,18 @@ fi
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(git -C "$PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null)/aad-v2}"
 ```
 
-`${PLUGIN_ROOT}/skills/aad/references/investigation-guide.md` と
-`${PLUGIN_ROOT}/agents/aad-planner.md` を読む。
+aad-planner の指示ファイルを読み込む:
+
+```bash
+PLANNER_PROMPT=$(cat "${PLUGIN_ROOT}/agents/aad-planner.md" 2>/dev/null || echo "")
+```
 
 以下のプロンプトで aad-planner を起動:
 
 ```
 Task(
   name: "aad-planner",
-  subagent_type: "general-purpose",
+  subagent_type: "aad-planner",
   prompt: """
   You are aad-planner. Generate implementation plan for this project.
 
@@ -73,7 +76,7 @@ Task(
   SCRIPTS_DIR: {SCRIPTS_DIR}
   CLAUDE_PLUGIN_ROOT: {PLUGIN_ROOT}
 
-  {aad-planner.md の全内容をここに貼り付ける}
+  ${PLANNER_PROMPT}
   """
 )
 ```

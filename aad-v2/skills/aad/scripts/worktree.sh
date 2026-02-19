@@ -69,6 +69,9 @@ with open(config_file, 'w') as f:
 " "$config_file" "$worktree_base" "$feature_name"
     fi
   else
+    if ! command -v jq >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+      echo "エラー: jq または python3 が必要です" >&2; exit 1
+    fi
     # jq/python3 非存在でもJSON特殊文字を安全にエスケープするためpython3を使用
     python3 -c "
 import json, sys
@@ -225,6 +228,8 @@ cmd_cleanup() {
     rm -rf "$worktree_base"
     echo "✓ worktreeベースディレクトリを削除しました: $worktree_base"
   fi
+
+  shopt -u nullglob
 
   git worktree prune
   echo "✓ クリーンアップが完了しました"

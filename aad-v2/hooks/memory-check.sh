@@ -1,4 +1,5 @@
 #!/bin/bash
+[[ "${AAD_HOOK_DEBUG:-}" == "1" ]] && set -x
 # Hook A: メモリ安全チェック
 # Claude Code PreToolUse (Bash) フック
 # 空きメモリが 512MB 未満の場合に BLOCK を出力する
