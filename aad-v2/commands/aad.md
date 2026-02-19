@@ -40,7 +40,6 @@ while [ $i -lt ${#ARGS[@]} ]; do
     *)
       arg="${ARGS[$i]}"
       if [ -z "$INPUT_SOURCE" ]; then
-        # is_path: / or ./ or ../ または既存ディレクトリ
         if { [[ "$arg" == /* ]] || [[ "$arg" == ./* ]] || [[ "$arg" == ../* ]] || [ -d "$arg" ]; } \
            && [ -z "$INPUT_SOURCE" ]; then
           PROJECT_DIR="$arg"
@@ -77,7 +76,7 @@ fi
 例: /aad ./my-project requirements.md aad/develop
 ```
 
-## Phase 1: 初期化
+## Phase 1: 初期化（インライン）
 
 ### 1a: feature-name を導出
 
@@ -112,17 +111,14 @@ git checkout "$PARENT_BRANCH" 2>/dev/null || git checkout -b "$PARENT_BRANCH"
 
 ```bash
 WORKTREE_DIR="${PROJECT_DIR}-${FEATURE_NAME}-wt"
-mkdir -p "$WORKTREE_DIR"
-```
-
-または:
-```bash
 if [ -n "$SCRIPTS_DIR" ]; then
   ${SCRIPTS_DIR}/worktree.sh create-parent "$PROJECT_DIR" "$PARENT_BRANCH" "$FEATURE_NAME"
+else
+  mkdir -p "$WORKTREE_DIR"
 fi
 ```
 
-### 1e: state.json 初期化（タスク単位・3層ハイブリッド）
+### 1e: state.json 初期化
 
 ```bash
 RUN_ID=$(date +%Y%m%d-%H%M%S)
@@ -141,339 +137,200 @@ STATEEOF
 
 ### 1f: project-config.json 作成
 
-```json
+```bash
+ABS_PROJECT=$(cd "$PROJECT_DIR" && pwd)
+cat > "${PROJECT_DIR}/.claude/aad/project-config.json" <<CFGEOF
 {
-  "projectDir": "{abs-path}",
-  "worktreeDir": "{abs-path}-{feature-name}-wt",
-  "featureName": "{feature-name}",
-  "parentBranch": "{branch}",
-  "runId": "{RUN_ID}",
-  "createdAt": "{ISO8601}",
+  "projectDir": "${ABS_PROJECT}",
+  "worktreeDir": "${ABS_PROJECT}-${FEATURE_NAME}-wt",
+  "featureName": "${FEATURE_NAME}",
+  "parentBranch": "${PARENT_BRANCH}",
+  "runId": "${RUN_ID}",
+  "createdAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "status": "initialized"
 }
+CFGEOF
 ```
 
 表示:
 ```
 ## Phase 1: 初期化完了
-✓ Feature: {feature-name} | Branch: {parent-branch} | Worktree: {worktree-dir}
+✓ Feature: {feature-name} | Branch: {parent-branch} | Run: {RUN_ID}
 ```
 
-## Phase 2: 計画生成
-
-### 2a: 依存関係インストール
+### フェーズゲート: post-init
 
 ```bash
-if [ -n "$SCRIPTS_DIR" ]; then
-  source "${SCRIPTS_DIR}/deps.sh"
-  deps_install "${PROJECT_DIR}"
-else
-  # インラインフォールバック（deps.shが利用できない場合）
-  [ -f "package.json" ] && command -v npm >/dev/null 2>&1 && npm install
-  [ -f "go.mod" ] && command -v go >/dev/null 2>&1 && go mod download
-  if [ -f "pyproject.toml" ] || [ -f "requirements.txt" ]; then
-    command -v uv >/dev/null 2>&1 \
-      && { uv venv .venv 2>/dev/null || true; uv pip install --python .venv/bin/python pytest; } \
-      || python3 -m pip install --user pytest 2>/dev/null || true
-  fi
+if [ -n "$SCRIPTS_DIR" ] && [ -f "${SCRIPTS_DIR}/phase-gate.sh" ]; then
+  bash "${SCRIPTS_DIR}/phase-gate.sh" post-init "$PROJECT_DIR" \
+    || { echo "✗ Phase 1 ゲート失敗。実行を中止します。" >&2; exit 1; }
 fi
 ```
 
-### 2b: aad-planner エージェントを起動
+## Phase 2: 計画生成 (via aad-phase-plan)
 
 ```
 Task(
-  name: "aad-planner",
-  subagent_type: "general-purpose",
+  name: "aad-phase-plan",
+  subagent_type: "aad-phase-plan",
   prompt: """
-  You are aad-planner. Generate implementation plan for this project.
-
   PROJECT_DIR: {PROJECT_DIR}
   INPUT_SOURCE: {INPUT_SOURCE}
   PARENT_BRANCH: {PARENT_BRANCH}
-
-  Output:
-  1. .claude/aad/requirements.md (with Interface Contracts section)
-  2. .claude/aad/plan.json (Wave-based structure)
-  3. Display plan summary in Japanese for user approval
-
-  [Follow aad-planner agent instructions]
+  SCRIPTS_DIR: {SCRIPTS_DIR}
+  WORKERS: {WORKERS}
+  DRY_RUN: {DRY_RUN}
+  SPEC_ONLY: {SPEC_ONLY}
+  CLAUDE_PLUGIN_ROOT: {PLUGIN_ROOT}
   """
 )
 ```
 
-待機。planner完了後 plan.json と requirements.md を読む。
-
-### 2c: 計画表示・ユーザー承認
-
-Wave構成・エージェント数・Interface Contractsを日本語で表示。
-`--dry-run` の場合: ここで終了。
-`--spec-only` の場合: requirements.md生成後に終了。
-
-承認を求める:
-```
-この計画で実行を続けますか？ (y/N)
-```
-
-## Phase 3: 実行
-
-### ベースラインref保存
+完了後、plan-output.json を読む:
 
 ```bash
-INITIAL_REF=$(git -C "$PROJECT_DIR" rev-parse HEAD)
-```
-
-### Wave 0: Bootstrap（逐次実行・team-lead直接）
-
-**IMPORTANT**: worktree/featureブランチを作成しない。親ブランチ上で直接作業。
-
-**前処理**:
-```bash
-if [ ! -f ".gitignore" ]; then
-  cat > .gitignore <<'GITIGNORE'
-__pycache__/
-*.pyc
-*.pyo
-.venv/
-*.egg-info/
-dist/
-build/
-.pytest_cache/
-node_modules/
-GITIGNORE
-  git add .gitignore && git commit -m "chore: add .gitignore"
+PLAN_OUTPUT="${PROJECT_DIR}/.claude/aad/phases/plan-output.json"
+if command -v jq >/dev/null 2>&1; then
+  WAVE_COUNT=$(jq '.waveCount // "?"' "$PLAN_OUTPUT" 2>/dev/null || echo "?")
+  AGENT_COUNT=$(jq '.agentCount // "?"' "$PLAN_OUTPUT" 2>/dev/null || echo "?")
+else
+  WAVE_COUNT=$(python3 -c "import json; d=json.load(open('$PLAN_OUTPUT')); print(d.get('waveCount', '?'))" 2>/dev/null || echo "?")
+  AGENT_COUNT=$(python3 -c "import json; d=json.load(open('$PLAN_OUTPUT')); print(d.get('agentCount', '?'))" 2>/dev/null || echo "?")
 fi
 ```
 
-**Interface Contracts → 共有型ファイル**:
-requirements.md の Interface Contracts セクションを読み、Wave 0 タスクとして
-共有型ファイルを作成（例: `src/types/api.ts`, `src/models/shared.py`）。
+`--dry-run` の場合: ここで終了。
+`--spec-only` の場合: requirements.md 生成後に終了。
 
-**TDDサイクル（フェーズを分けてコミット）**:
-- RED: `test(core): add tests for <description>` → 即コミット
-- GREEN: `feat(core): implement <description>` → 即コミット（REDと混合禁止）
-- REFACTOR: `refactor(core): <description>` → 変更あれば即コミット
+承認を求める:
+```
+## Phase 2: 計画生成完了
+Wave数: {WAVE_COUNT} | エージェント数: {AGENT_COUNT}
 
-**state.json 更新（タスクごと）**:
-```json
-{
-  "tasks": {
-    "wave0-{task-id}": { "level": 0, "status": "completed", "completedAt": "..." }
-  }
-}
+この計画で実行を続けますか？ (y/N)
 ```
 
-**Wave 0 完了後に依存関係を再インストール**（新しいmanifestが生成された可能性）:
+### フェーズゲート: post-plan
+
 ```bash
-deps_install "${PROJECT_DIR}"  # または同等のインラインコマンド
+if [ -n "$SCRIPTS_DIR" ] && [ -f "${SCRIPTS_DIR}/phase-gate.sh" ]; then
+  bash "${SCRIPTS_DIR}/phase-gate.sh" post-plan "$PROJECT_DIR" \
+    || { echo "✗ Phase 2 ゲート失敗。計画が不正です。" >&2; exit 1; }
+fi
 ```
 
-### Wave 1+: 並列実行（Agent Teams）
-
-**Wave N ごとの処理**:
-
-**N-1.** ベースref保存:
-```bash
-WAVE_START_REF=$(git -C "$PROJECT_DIR" rev-parse HEAD)
-```
-
-**N-2.** チーム作成:
-```
-TeamCreate(team_name: "aad-wave-{N}")
-```
-
-**N-3.** Worktree作成（symlink付き）:
-```bash
-${SCRIPTS_DIR}/worktree.sh create-task \
-  {WORKTREE_DIR} {agent-name} {branch-name} {PARENT_BRANCH}
-
-# 共有依存をsymlink（dist/build/は除外）
-${SCRIPTS_DIR}/worktree.sh setup-symlinks \
-  {PROJECT_DIR} {WORKTREE_DIR}/{agent-name}
-```
-
-**N-4.** タスク作成とstate.json更新:
-```
-TaskCreate(subject: "{task}", description: "...", activeForm: "...")
-```
-```json
-{
-  "tasks": { "{agent-name}": { "level": N, "status": "pending" } }
-}
-```
-
-**N-5.** エージェントをバッチ起動（WORKERSで並列数制限）:
-
-Wave N のエージェント数を AGENT_COUNT とする。
-
-- AGENT_COUNT <= WORKERS: 全エージェントを1メッセージで同時起動（従来通り）
-- AGENT_COUNT > WORKERS: WORKERS 個ずつバッチに分割して順次起動。
-  各バッチの全エージェントが完了（メッセージ受信 or shutdown）してから次バッチを起動。
-  バッチ内のエージェントは1メッセージで同時起動。
-
-例: WORKERS=3, エージェント5体 → Batch1: 3体同時, Batch2: 2体同時
+## Phase 3: 実装実行 (via aad-phase-execute)
 
 ```
-Task(name: "{AGENT_NAME}", model: "{MODEL}", team_name: "aad-wave-{N}",
+Task(
+  name: "aad-phase-execute",
+  subagent_type: "aad-phase-execute",
   prompt: """
-  You are {AGENT_NAME}, a TDD Worker in Wave {N}.
-
-  WORKTREE_PATH: {WORKTREE_PATH}
-  AAD_WORKTREE_PATH: {WORKTREE_PATH}
-  AGENT_NAME: {AGENT_NAME}
-  PARENT_BRANCH: {PARENT_BRANCH}
   PROJECT_DIR: {PROJECT_DIR}
+  WORKTREE_DIR: {WORKTREE_DIR}
+  PARENT_BRANCH: {PARENT_BRANCH}
   SCRIPTS_DIR: {SCRIPTS_DIR}
-
-  Tasks: {TASK_LIST from plan.json}
-  Files: {FILE_LIST from plan.json}
-  Test Cases: {TEST_CASES from plan.json}
-
-  Interface Contracts (from requirements.md):
-  {paste Interface Contracts section verbatim}
-
-  {paste content of skills/aad/references/subagent-prompt.md}
-  """)
-
-Task(name: "{agent-2}", ...)
-...
-```
-
-**N-6.** 完了監視・state.json更新:
-エージェントからのメッセージを受信するたびに:
-```json
-{ "tasks": { "{agent}": { "status": "completed", "mergedAt": "..." } } }
-```
-
-**N-7.** マージコンフリクト処理（必要時）:
-```
-Task(
-  name: "aad-merge-resolver",
-  subagent_type: "general-purpose",
-  prompt: "You are aad-merge-resolver. Resolve conflicts in: {conflicting-files}. Project: {PROJECT_DIR}. Do NOT commit."
-)
-```
-完了後 `git commit` でマージを確定。mergeLog を state.json に追記。
-
-**N-8.** Worktree削除:
-```bash
-${SCRIPTS_DIR}/worktree.sh remove {WORKTREE_DIR}/{agent} {branch-name}
-```
-
-**N-9.** エージェントシャットダウン:
-```
-SendMessage(type: "shutdown_request", recipient: "{agent}", content: "Wave {N}完了")
-```
-`TeamDelete()`
-
-**N-10.** 依存関係再インストール（mergeで新manifest追加の可能性）:
-```bash
-deps_install "${PROJECT_DIR}"
-```
-
-**N-11.** 状態更新:
-```json
-{
-  "currentLevel": N+1,
-  "completedLevels": [..., N]
-}
-```
-
-**N-12.** Wave内コードレビュー（`AAD_SKIP_REVIEW=true` でなければ）。レビュー並列数も WORKERS で制限する:
-```bash
-WAVE_DIFF=$(git -C "$PROJECT_DIR" diff ${WAVE_START_REF}..HEAD)
-WAVE_FILES=$(git -C "$PROJECT_DIR" diff --name-only ${WAVE_START_REF}..HEAD)
-```
-```
-Task(
-  name: "review-coordinator-wave-{N}",
-  subagent_type: "general-purpose",
-  prompt: """
-  You are aad-reviewer in Coordinator mode.
-  Wave {N} の変更をレビューしてください。
-
-  Changed Files: {WAVE_FILES}
-  Diff: {WAVE_DIFF}
-  Project: {PROJECT_DIR}
-  SCRIPTS_DIR: {SCRIPTS_DIR}
-
-  {paste content of skills/aad/references/review-process.md}
-  """
-)
-```
-結果を表示。
-
-## Phase 4: 最終コードレビュー
-
-全Wave完了後（`AAD_SKIP_REVIEW=true` でなければ）:
-
-```bash
-FULL_DIFF=$(git -C "$PROJECT_DIR" diff ${INITIAL_REF}..HEAD)
-FULL_FILES=$(git -C "$PROJECT_DIR" diff --name-only ${INITIAL_REF}..HEAD)
-COMMITS=$(git -C "$PROJECT_DIR" log --oneline ${INITIAL_REF}..HEAD)
-```
-
-```
-Task(
-  name: "final-review",
-  subagent_type: "general-purpose",
-  prompt: """
-  You are aad-reviewer in Coordinator mode.
-  実装全体（全Wave）の最終コードレビューを実施してください。
-
-  Changed Files: {FULL_FILES}
-  Commits: {COMMITS}
-  Diff: {FULL_DIFF}
-  Project: {PROJECT_DIR}
-  SCRIPTS_DIR: {SCRIPTS_DIR}
-
-  {paste content of skills/aad/references/review-process.md}
+  WORKERS: {WORKERS}
+  SKIP_REVIEW: {SKIP_REVIEW}
+  PLUGIN_ROOT: {PLUGIN_ROOT}
   """
 )
 ```
 
-## Phase 5: PR 作成
+完了後、execute-output.json を読む:
+
+```bash
+EXECUTE_OUTPUT="${PROJECT_DIR}/.claude/aad/phases/execute-output.json"
+if command -v jq >/dev/null 2>&1; then
+  INITIAL_REF=$(jq -r '.initialRef // empty' "$EXECUTE_OUTPUT" 2>/dev/null || echo "")
+  COMMIT_COUNT=$(jq '.commitCount // "?"' "$EXECUTE_OUTPUT" 2>/dev/null || echo "?")
+else
+  INITIAL_REF=$(python3 -c "import json; d=json.load(open('$EXECUTE_OUTPUT')); print(d.get('initialRef', ''))" 2>/dev/null || echo "")
+  COMMIT_COUNT=$(python3 -c "import json; d=json.load(open('$EXECUTE_OUTPUT')); print(d.get('commitCount', '?'))" 2>/dev/null || echo "?")
+fi
+```
+
+表示: `## Phase 3: 実装実行完了 | コミット数: {COMMIT_COUNT}`
+
+### フェーズゲート: post-execute
+
+```bash
+if [ -n "$SCRIPTS_DIR" ] && [ -f "${SCRIPTS_DIR}/phase-gate.sh" ]; then
+  bash "${SCRIPTS_DIR}/phase-gate.sh" post-execute "$PROJECT_DIR" \
+    || { echo "✗ Phase 3 ゲート失敗。実行に問題があります。" >&2; exit 1; }
+fi
+```
+
+## Phase 4: 最終コードレビュー (via aad-phase-review)
+
+`AAD_SKIP_REVIEW=true` でなければ実行:
+
+```
+Task(
+  name: "aad-phase-review",
+  subagent_type: "aad-phase-review",
+  prompt: """
+  PROJECT_DIR: {PROJECT_DIR}
+  INITIAL_REF: {INITIAL_REF}
+  SCRIPTS_DIR: {SCRIPTS_DIR}
+  PLUGIN_ROOT: {PLUGIN_ROOT}
+  """
+)
+```
+
+完了後、review-output.json を読む:
+
+```bash
+REVIEW_OUTPUT="${PROJECT_DIR}/.claude/aad/phases/review-output.json"
+if [ -f "$REVIEW_OUTPUT" ]; then
+  if command -v jq >/dev/null 2>&1; then
+    CRITICAL=$(jq '.critical // 0' "$REVIEW_OUTPUT" 2>/dev/null || echo "0")
+    WARNING=$(jq '.warning // 0' "$REVIEW_OUTPUT" 2>/dev/null || echo "0")
+    AUTO_FIXED=$(jq '.autoFixed // 0' "$REVIEW_OUTPUT" 2>/dev/null || echo "0")
+  else
+    CRITICAL=$(python3 -c "import json; d=json.load(open('$REVIEW_OUTPUT')); print(d.get('critical', 0))" 2>/dev/null || echo "0")
+    WARNING=$(python3 -c "import json; d=json.load(open('$REVIEW_OUTPUT')); print(d.get('warning', 0))" 2>/dev/null || echo "0")
+    AUTO_FIXED=$(python3 -c "import json; d=json.load(open('$REVIEW_OUTPUT')); print(d.get('autoFixed', 0))" 2>/dev/null || echo "0")
+  fi
+  echo "## Phase 4: 最終コードレビュー完了"
+  echo "Critical: ${CRITICAL} | Warning: ${WARNING} | 自動修正: ${AUTO_FIXED}件"
+fi
+```
+
+### フェーズゲート: post-review
+
+```bash
+if [ -n "$SCRIPTS_DIR" ] && [ -f "${SCRIPTS_DIR}/phase-gate.sh" ]; then
+  bash "${SCRIPTS_DIR}/phase-gate.sh" post-review "$PROJECT_DIR" 2>/dev/null || true
+  # post-review は警告のみ (exit 0 維持)
+fi
+```
+
+## Phase 5: PR 作成 (via aad-phase-pr)
 
 `gh` コマンドが利用可能かつ remote が存在する場合:
 
-```bash
-WAVE_COUNT=$(jq '.completedLevels | length' "${PROJECT_DIR}/.claude/aad/state.json" 2>/dev/null || echo "?")
-AGENT_COUNT=$(jq '.tasks | length' "${PROJECT_DIR}/.claude/aad/state.json" 2>/dev/null || echo "?")
-COMMIT_COUNT=$(git -C "$PROJECT_DIR" log --oneline ${INITIAL_REF}..HEAD | wc -l | tr -d ' ')
-FEATURE_TITLE=$(jq -r '.featureName // "implementation"' "${PROJECT_DIR}/.claude/aad/plan.json" 2>/dev/null)
-
-git -C "$PROJECT_DIR" push -u origin "$PARENT_BRANCH" 2>/dev/null || true
-
-gh pr create --draft \
-  --title "feat: ${FEATURE_TITLE}" \
-  --body "$(cat <<'PREOF'
-## 実装サマリー — AAD v2
-
-### 統計
-- Wave数: ${WAVE_COUNT}
-- エージェント数: ${AGENT_COUNT}
-- コミット数: ${COMMIT_COUNT}
-
-### 実装内容
-{plan.json の tasks サマリー}
-
-### コードレビュー
-{最終レビュー結果のサマリー}
-
----
-*Generated by /aad (aad-v2 ${RUN_ID})*
-PREOF
-)"
-echo "✓ Draft PR作成完了"
+```
+Task(
+  name: "aad-phase-pr",
+  subagent_type: "aad-phase-pr",
+  prompt: """
+  PROJECT_DIR: {PROJECT_DIR}
+  INITIAL_REF: {INITIAL_REF}
+  RUN_ID: {RUN_ID}
+  PARENT_BRANCH: {PARENT_BRANCH}
+  """
+)
 ```
 
-## Phase 6: クリーンアップ
+完了後、pr-output.json を読んで PR URL を表示。
+
+## Phase 6: クリーンアップ（インライン）
 
 `--keep-worktrees` でなければ:
 
 ```bash
 if [ -n "$SCRIPTS_DIR" ]; then
-  # cleanup.sh run が内部で worktree.sh cleanup を呼ぶため二重呼び出し不要
   ${SCRIPTS_DIR}/cleanup.sh run "$PROJECT_DIR"
 else
   git worktree prune
@@ -483,12 +340,12 @@ else
 fi
 ```
 
-state.jsonアーカイブ:
+state.json アーカイブ:
 ```bash
 ARCHIVE_DIR="${PROJECT_DIR}/.claude/aad/archive/${RUN_ID}"
 mkdir -p "$ARCHIVE_DIR"
-cp "${PROJECT_DIR}/.claude/aad/state.json" "${ARCHIVE_DIR}/"
-cp "${PROJECT_DIR}/.claude/aad/plan.json"  "${ARCHIVE_DIR}/"
+cp "${PROJECT_DIR}/.claude/aad/state.json" "${ARCHIVE_DIR}/" 2>/dev/null || true
+cp "${PROJECT_DIR}/.claude/aad/plan.json"  "${ARCHIVE_DIR}/" 2>/dev/null || true
 ```
 
 ## 復旧フロー（エラー時）
@@ -496,15 +353,11 @@ cp "${PROJECT_DIR}/.claude/aad/plan.json"  "${ARCHIVE_DIR}/"
 state.json を読んで `status: "failed"` のタスクを特定:
 
 ```bash
-# 失敗タスクの確認
 jq '.tasks | to_entries[] | select(.value.status == "failed")' state.json
-
-# git logと照合（実際にマージ済みのコミットを確認）
 git log --oneline ${INITIAL_REF}..HEAD | grep "merge(wave"
 ```
 
-失敗タスクのみ worktree 再作成・エージェント再 spawn。
-成功済みレベルはスキップ。最初の未完了レベルから再開。
+失敗タスクのみ worktree 再作成・エージェント再 spawn。成功済みレベルはスキップ。
 
 ## 出力フォーマット
 
@@ -515,25 +368,16 @@ git log --oneline ${INITIAL_REF}..HEAD | grep "merge(wave"
 ✓ Feature: {name} | Branch: {branch} | Run: {run-id}
 
 ## Phase 2: 計画生成 ✓
-Wave数: {N} | エージェント数: {M} | ファイル数: {K}
-
-### Interface Contracts
-| Method | Path | Request | Response |
-...
+Wave数: {N} | エージェント数: {M}
 
 この計画で実行を続けますか？ (y/N):
 
 ## Phase 3: 実装実行
-
 ### Wave 0: Bootstrap ✓
-✓ コアモデル作成 | ✓ 共有型ファイル作成
-
-### Wave 1: 並列実行 (2エージェント)
-✓ agent-order 完了 (3コミット) | ✓ agent-portfolio 完了 (4コミット)
-✓ マージ完了 | ✓ Waveレビュー: Critical 0, Warning 1
+### Wave 1: 並列実行 ({N}エージェント) ✓
 
 ## Phase 4: 最終コードレビュー ✓
-Critical: 0 | Warning: 2 | Info: 5 | 自動修正: 2件
+Critical: 0 | Warning: 2 | 自動修正: 2件
 
 ## Phase 5: PR作成 ✓
 Draft PR: {url}
@@ -541,7 +385,7 @@ Draft PR: {url}
 ## Phase 6: クリーンアップ ✓
 
 # 完了
-Wave数: {N} | エージェント数: {M} | コミット数: {K} | 実行時間: {T}分
+Wave数: {N} | エージェント数: {M} | コミット数: {K}
 ```
 
 ## 重要制約
@@ -551,3 +395,4 @@ Wave数: {N} | エージェント数: {M} | コミット数: {K} | 実行時間:
 - エージェント失敗時は state.json に記録して継続
 - エラー時もリソースクリーンアップを実施
 - `AAD_STRICT_TDD=true` 時、TDDサイクル未遵守をエラー扱い
+- フェーズゲート失敗時は実行を中止（post-review のみ警告）

@@ -8,6 +8,10 @@
     "agents/aad-tdd-worker.md",
     "agents/aad-planner.md",
     "agents/aad-reviewer.md",
-    "agents/aad-merge-resolver.md"
+    "agents/aad-merge-resolver.md",
+    "agents/aad-phase-plan.md",
+    "agents/aad-phase-execute.md",
+    "agents/aad-phase-review.md",
+    "agents/aad-phase-pr.md"
   ]
 }

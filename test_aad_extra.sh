@@ -500,6 +500,207 @@ json.dump({'worktreeDir': sys.argv[1], 'parentBranch': sys.argv[2]}, open(sys.ar
 }
 
 # ============================================================
+# 13. retry.sh テスト
+# ============================================================
+test_retry() {
+  header "13. retry.sh"
+
+  local RETRY_SH="${SCRIPTS_DIR}/retry.sh"
+
+  # 13-1: 引数なし → exit 1
+  if ! bash "$RETRY_SH" 2>/dev/null; then
+    pass "13-1: 引数なし → exit 1"
+  else
+    fail "13-1" "exit 0 が返った"
+  fi
+
+  # 13-2: 初回成功 → リトライなし
+  local out
+  out=$(bash "$RETRY_SH" -- true 2>&1)
+  if ! echo "$out" | grep -q "リトライ"; then
+    pass "13-2: 初回成功 → リトライなし"
+  else
+    fail "13-2" "不要なリトライが発生: $out"
+  fi
+
+  # 13-3: 失敗→成功パターン (カウンタファイルで制御)
+  local counter_file="${TEST_DIR}/retry_counter"
+  local test_cmd="${TEST_DIR}/retry_test_cmd.sh"
+  echo "0" > "$counter_file"
+  cat > "$test_cmd" <<EOF
+#!/usr/bin/env bash
+count=\$(cat "$counter_file")
+count=\$((count+1))
+echo "\$count" > "$counter_file"
+[ "\$count" -ge 2 ]
+EOF
+  chmod +x "$test_cmd"
+  bash "$RETRY_SH" --max 3 --delay 0 -- bash "$test_cmd" 2>/dev/null
+  local final_count
+  final_count=$(cat "$counter_file")
+  if [[ "$final_count" -ge 2 ]]; then
+    pass "13-3: 失敗→成功パターン (2回目で成功)"
+  else
+    fail "13-3" "期待した試行回数がない: count=${final_count}"
+  fi
+  rm -f "$counter_file" "$test_cmd"
+
+  # 13-4: 全リトライ失敗 → exit 1
+  if ! bash "$RETRY_SH" --max 3 --delay 0 -- false 2>/dev/null; then
+    pass "13-4: 全リトライ失敗 → exit 1"
+  else
+    fail "13-4" "exit 0 が返った"
+  fi
+
+  # 13-5: --backoff オプション + delay=0 → エラーなしで動作
+  local counter_file2="${TEST_DIR}/backoff_counter"
+  local backoff_cmd="${TEST_DIR}/backoff_cmd.sh"
+  echo "0" > "$counter_file2"
+  cat > "$backoff_cmd" <<EOF
+#!/usr/bin/env bash
+count=\$(cat "$counter_file2")
+count=\$((count+1))
+echo "\$count" > "$counter_file2"
+[ "\$count" -ge 2 ]
+EOF
+  chmod +x "$backoff_cmd"
+  bash "$RETRY_SH" --max 3 --delay 0 --backoff -- bash "$backoff_cmd" 2>/dev/null
+  local backoff_count
+  backoff_count=$(cat "$counter_file2")
+  if [[ "$backoff_count" -ge 2 ]]; then
+    pass "13-5: --backoff + delay=0 → 2回目で成功"
+  else
+    fail "13-5" "backoffが正常に動作しない: count=${backoff_count}"
+  fi
+  rm -f "$counter_file2" "$backoff_cmd"
+}
+
+# ============================================================
+# 14. phase-gate.sh テスト
+# ============================================================
+test_phase_gate() {
+  header "14. phase-gate.sh"
+
+  local GATE_SH="${SCRIPTS_DIR}/phase-gate.sh"
+  local gate_dir="${TEST_DIR}/gate_project"
+  local aad_dir="${gate_dir}/.claude/aad"
+
+  mkdir -p "${aad_dir}/phases"
+  cd "$gate_dir"
+  git init -q
+  git config user.email "test@example.com"
+  git config user.name "Test"
+  echo "# gate test" > README.md
+  git add -A && git commit -q -m "init"
+
+  local out
+
+  # 14-1: post-init 正常系 → GATE PASS
+  echo '{"runId":"test-run","currentLevel":0,"completedLevels":[],"tasks":{},"mergeLog":[]}' \
+    > "${aad_dir}/state.json"
+  echo "{\"projectDir\":\"${gate_dir}\",\"worktreeDir\":\"/tmp/wt\",\"featureName\":\"test\",\"parentBranch\":\"aad/develop\"}" \
+    > "${aad_dir}/project-config.json"
+  out=$(bash "$GATE_SH" post-init "$gate_dir" 2>&1)
+  if echo "$out" | grep -q "GATE PASS"; then
+    pass "14-1: post-init 正常 → GATE PASS"
+  else
+    fail "14-1" "GATE PASSが出力されない: $out"
+  fi
+
+  # 14-2: post-plan plan.json なし → GATE FAIL
+  rm -f "${aad_dir}/plan.json"
+  out=$(bash "$GATE_SH" post-plan "$gate_dir" 2>&1 || true)
+  if echo "$out" | grep -q "GATE FAIL"; then
+    pass "14-2: post-plan plan.json なし → GATE FAIL"
+  else
+    fail "14-2" "GATE FAILが出力されない: $out"
+  fi
+
+  # 14-3: post-plan wave数 0 → GATE FAIL
+  echo '{"featureName":"test","waves":[]}' > "${aad_dir}/plan.json"
+  out=$(AAD_SCRIPTS_DIR="$SCRIPTS_DIR" bash "$GATE_SH" post-plan "$gate_dir" 2>&1 || true)
+  if echo "$out" | grep -q "GATE FAIL"; then
+    pass "14-3: post-plan wave数 0 → GATE FAIL"
+  else
+    fail "14-3" "wave数0なのにGATE FAILが出力されない: $out"
+  fi
+
+  # 14-4: post-plan 正常系 → GATE PASS
+  cat > "${aad_dir}/plan.json" <<'PLANEOF'
+{
+  "featureName": "test",
+  "waves": [
+    {"id": 0, "type": "bootstrap", "tasks": []},
+    {"id": 1, "type": "parallel",
+     "agents": [{"name": "agent-a", "tasks": [], "files": [], "dependsOn": []}]}
+  ]
+}
+PLANEOF
+  out=$(AAD_SCRIPTS_DIR="$SCRIPTS_DIR" bash "$GATE_SH" post-plan "$gate_dir" 2>&1)
+  if echo "$out" | grep -q "GATE PASS"; then
+    pass "14-4: post-plan 正常 → GATE PASS"
+  else
+    fail "14-4" "GATE PASSが出力されない: $out"
+  fi
+
+  # 14-5: post-execute ロックファイル残存 → GATE FAIL
+  echo "99999" > "${aad_dir}/aad-merge.lock"
+  out=$(bash "$GATE_SH" post-execute "$gate_dir" 2>&1 || true)
+  if echo "$out" | grep -q "GATE FAIL"; then
+    pass "14-5: post-execute ロックファイル残存 → GATE FAIL"
+  else
+    fail "14-5" "GATE FAILが出力されない: $out"
+  fi
+  rm -f "${aad_dir}/aad-merge.lock"
+
+  # 14-6: post-execute failed タスクあり → GATE FAIL
+  echo '{"runId":"r","currentLevel":1,"completedLevels":[],"tasks":{"agent-a":{"level":1,"status":"failed"}},"mergeLog":[]}' \
+    > "${aad_dir}/state.json"
+  out=$(bash "$GATE_SH" post-execute "$gate_dir" 2>&1 || true)
+  if echo "$out" | grep -q "GATE FAIL"; then
+    pass "14-6: post-execute failed タスクあり → GATE FAIL"
+  else
+    fail "14-6" "GATE FAILが出力されない: $out"
+  fi
+
+  # 14-7: post-execute 正常系 → GATE PASS
+  echo '{"runId":"r","currentLevel":2,"completedLevels":[0,1],"tasks":{"agent-a":{"level":1,"status":"completed"}},"mergeLog":[]}' \
+    > "${aad_dir}/state.json"
+  out=$(bash "$GATE_SH" post-execute "$gate_dir" 2>&1)
+  if echo "$out" | grep -q "GATE PASS"; then
+    pass "14-7: post-execute 正常 → GATE PASS"
+  else
+    fail "14-7" "GATE PASSが出力されない: $out"
+  fi
+
+  # 14-8: post-review review-output.json なし → GATE PASS (スキップ)
+  rm -f "${aad_dir}/phases/review-output.json"
+  out=$(bash "$GATE_SH" post-review "$gate_dir" 2>&1)
+  if echo "$out" | grep -q "GATE PASS"; then
+    pass "14-8: post-review review-output なし → GATE PASS (スキップ)"
+  else
+    fail "14-8" "GATE PASSが出力されない: $out"
+  fi
+
+  # 14-9: post-review critical > 0 → WARN + exit 0 (GATE PASS)
+  echo '{"status":"completed","critical":2,"warning":1,"info":3,"autoFixed":0}' \
+    > "${aad_dir}/phases/review-output.json"
+  out=$(bash "$GATE_SH" post-review "$gate_dir" 2>&1)
+  local exit_code=0
+  bash "$GATE_SH" post-review "$gate_dir" >/dev/null 2>&1 || exit_code=$?
+  if echo "$out" | grep -q "GATE PASS" && [[ "$exit_code" -eq 0 ]]; then
+    pass "14-9: post-review critical > 0 → WARN + GATE PASS (exit 0)"
+  elif echo "$out" | grep -q "GATE PASS"; then
+    pass "14-9: post-review critical > 0 → GATE PASS"
+  else
+    fail "14-9" "GATE PASSが出力されない: $out"
+  fi
+
+  cd "$TEST_DIR"
+  rm -rf "$gate_dir"
+}
+
+# ============================================================
 # メイン
 # ============================================================
 main() {
@@ -519,6 +720,8 @@ main() {
   test_worktree_edge
   test_deps_edge
   test_cleanup_edge
+  test_retry
+  test_phase_gate
 
   echo
   echo "=============================="
