@@ -213,6 +213,7 @@ Critical: 1 | Warning: 3 | Info: 2 | 自動修正: 0件
 | `AAD_STRICT_TDD=true` | TDDサイクル未遵守をエラー扱い |
 | `AAD_WORKERS=N` | 最大並列数（デフォルト: 3） |
 | `AAD_SCRIPTS_DIR` | スクリプトディレクトリの明示指定 |
+| `AAD_HOOK_DEBUG=1` | フックの詳細ログを有効化（`set -x`） |
 
 ## 状態管理（3層ハイブリッド）
 
